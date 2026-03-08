@@ -1,60 +1,47 @@
 # NGIN.Log
 
-NGIN.Log is a standalone, performance-focused C++23 logging component in the NGIN platform family.
+NGIN.Log is a standalone C++23 logging library in the NGIN family.
 
-It is designed for:
-- macro-free call sites,
-- explicit and predictable source metadata,
-- compile-time and runtime filtering,
-- bounded record construction,
-- multi-sink fan-out with async sink wrapping.
+It focuses on explicit, structured, performance-conscious logging without relying on macro-heavy APIs.
 
-## Key Properties
+The short version is:
 
-- Macro-free API (`std::source_location`, templates, `if constexpr`)
-- Compile-time level stripping (`Logger<CompileTimeMin>`)
-- Runtime per-logger level control
-- Structured key-value attributes
-- Lock-free sink read path during dispatch
-- Drop-on-full async sink policy (producer latency protection)
-- Pluggable formatting policy (`StdFormatter` by default)
+- macro-free logging API
+- explicit source metadata
+- compile-time and runtime filtering
+- structured attributes
+- sync and async sink composition
 
-## Build Targets
+It is designed to be useful as a normal C++ logging library, not only inside the full NGIN platform.
 
-- `NGIN::Log::Static` (`-DNGIN_LOG_BUILD_STATIC=ON`)
-- `NGIN::Log::Shared` (`-DNGIN_LOG_BUILD_SHARED=ON`)
-- `NGIN::Log` alias resolves to shared when present, else static
+## What NGIN.Log Is For
 
-## Build Options
+NGIN.Log is for applications that want:
 
-Main CMake options:
-- `NGIN_LOG_BUILD_STATIC` (default `ON`)
-- `NGIN_LOG_BUILD_SHARED` (default `OFF`)
-- `NGIN_LOG_BUILD_TESTS` (default `ON`)
-- `NGIN_LOG_BUILD_EXAMPLES` (default `ON`)
-- `NGIN_LOG_BUILD_BENCHMARKS` (default `ON`)
-- `NGIN_LOG_ENABLE_ASAN` (default `OFF`)
-- `NGIN_LOG_ENABLE_TSAN` (default `OFF`)
-- `NGIN_LOG_ENABLE_LTO` (default `OFF`)
-- `NGIN_LOG_STRICT_WARNINGS` (default `ON`)
+- clear logging call sites
+- predictable filtering behavior
+- structured records
+- multiple sinks
+- async logging without turning the producer path into a black box
 
-Typical local configure:
+It aims to keep the logging model explicit: what gets logged, where it goes, and when it is filtered should be understandable from the code.
 
-```bash
-cmake -S NGIN.Log -B NGIN.Log/build \
-  -DNGIN_LOG_BUILD_TESTS=ON \
-  -DNGIN_LOG_BUILD_EXAMPLES=ON \
-  -DNGIN_LOG_BUILD_BENCHMARKS=ON
-cmake --build NGIN.Log/build -j
-ctest --test-dir NGIN.Log/build --output-on-failure
-```
+## What It Provides
 
-## Quick Start
+NGIN.Log provides:
+
+- macro-free logger APIs
+- compile-time minimum log levels
+- runtime per-logger level control
+- structured key-value attributes
+- sink fan-out
+- async sink wrapping with bounded queues
+- built-in sinks such as console and file sinks
+
+## Quick Example
 
 ```cpp
 #include <NGIN/Log/Log.hpp>
-
-#include <source_location>
 
 int main()
 {
@@ -69,145 +56,71 @@ int main()
         rec.Message("started");
         rec.Attr("pid", static_cast<NGIN::UInt64>(1234));
     });
-
-    logger.Debugf(std::source_location::current(), "value={} count={}", 7, 2);
 }
 ```
 
-## API Modes
+## The Main API Styles
 
-### 1) Lazy Builder API (hot path)
+### Builder API
 
-Preferred for performance-sensitive code:
+Best when you want tight control over work done on the logging path.
 
 ```cpp
 logger.Debug([&](NGIN::Log::RecordBuilder& rec) {
     rec.Message("cache miss");
     rec.Attr("key", std::string_view("user:42"));
-    rec.Attr("retry", false);
 });
 ```
 
-Properties:
-- disabled compile-time levels are stripped,
-- runtime-disabled levels return early,
-- no format-argument evaluation when disabled (caller controls work in lambda),
-- bounded message/attribute storage.
+### Format API
 
-### 2) Compile-time format-checked API (`*f`)
+Useful when convenience matters more than minimizing every instruction on the hot path.
 
 ```cpp
 logger.Infof(std::source_location::current(), "value={} ok={}", value, ok);
 ```
 
-Properties:
-- compile-time format checking via `std::format_string<Args...>`,
-- explicit source required for accurate caller metadata,
-- arguments are evaluated before runtime filter short-circuit.
+## Build Targets
 
-### 3) Runtime format API (`*fv`)
+- `NGIN::Log::Static`
+- `NGIN::Log::Shared`
+- `NGIN::Log` alias resolves to shared when present, else static
 
-```cpp
-int value = 17;
-bool ok = true;
-logger.Debugfv(
-    std::source_location::current(),
-    "value={} ok={}",
-    std::make_format_args(value, ok));
+## Build Options
+
+Main CMake options:
+
+- `NGIN_LOG_BUILD_STATIC` default `ON`
+- `NGIN_LOG_BUILD_SHARED` default `OFF`
+- `NGIN_LOG_BUILD_TESTS` default `ON`
+- `NGIN_LOG_BUILD_EXAMPLES` default `ON`
+- `NGIN_LOG_BUILD_BENCHMARKS` default `ON`
+- `NGIN_LOG_ENABLE_ASAN` default `OFF`
+- `NGIN_LOG_ENABLE_TSAN` default `OFF`
+- `NGIN_LOG_ENABLE_LTO` default `OFF`
+- `NGIN_LOG_STRICT_WARNINGS` default `ON`
+
+## Typical Local Build
+
+```bash
+cmake -S . -B build \
+  -DNGIN_LOG_BUILD_TESTS=ON \
+  -DNGIN_LOG_BUILD_EXAMPLES=ON \
+  -DNGIN_LOG_BUILD_BENCHMARKS=ON
+
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-Properties:
-- supports dynamic/runtime format strings,
-- explicit source required,
-- may allocate internally (`std::vformat` path),
-- intended for non-hot-path/config-driven formatting.
+## Where It Fits
 
-## Source Location Semantics
+Within the NGIN ecosystem, NGIN.Log is the logging layer other libraries can build on.
 
-- Lazy APIs (`Trace/Debug/...`) default source to `std::source_location::current()` at the call site.
-- `*f` and `*fv` APIs require explicit source argument.
-- No convenience `*f(fmt, ...)` overload is provided, because macro-free wrappers cannot reliably preserve true caller source.
+It is still a normal standalone library, but in the platform stack it commonly sits above `NGIN.Base` and below higher-level runtime or tooling layers.
 
-## Filtering Semantics
+## Read Next
 
-Rule of execution:
-- If call-site level `< CompileTimeMin`, the call is compiled out.
-- If call-site level `>= CompileTimeMin`, it is still gated by runtime level (`SetRuntimeMin` / constructor runtime level).
-
-Example:
-- `Logger<LogLevel::Warn>` will strip `Trace/Debug/Info` call sites at compile time.
-- `Warn/Error/Fatal` remain compiled and are runtime-filtered.
-
-## Structured Attributes And Bounded Storage
-
-Attribute value types:
-- `NGIN::Int64`
-- `NGIN::UInt64`
-- `double`
-- `bool`
-- `std::string_view`
-
-Current defaults in `NGIN::Log::Config`:
-- `MaxMessageBytes = 512`
-- `MaxAttributes = 8`
-- `MaxAttrTextBytes = 256`
-- `AsyncQueueCapacity = 8192`
-
-Overflow behavior:
-- Excess attributes are dropped and counted in `truncatedAttributeCount`.
-- Message/attribute text truncation is counted in `truncatedBytes`.
-
-## Sink Model
-
-- Sinks implement `ILogSink::Write(const LogRecordView&)` + `Flush()`.
-- Logger fan-out iterates active sink set.
-- Read/dispatch path is lock-free (atomic active generation pointer).
-- `SetSinks` is synchronized on write path.
-- Old sink generations remain owned until logger destruction (important if sink sets are reconfigured frequently).
-
-## Built-in Sinks
-
-- `NullSink`: drops all records.
-- `ConsoleSink`: stdout/stderr output with optional source emission.
-- `FileSink`: thread-safe file output with reopen support.
-- `AsyncSink<TSink>`:
-  - bounded MPSC queue,
-  - drop-on-full policy,
-  - producer-side fixed-size copy path,
-  - worker flush/drain support,
-  - dropped-count reporting.
-
-## Async Sink Ownership / Materialization
-
-- `AsyncSink::Write` copies record data into owned inline payload before enqueue.
-- Queue payload owns message/logger/attribute text required by the consumer thread.
-- Producer path is allocation-free for record materialization/copy.
-
-## Logger Registry
-
-`LoggerRegistry` provides:
-- named logger get-or-create,
-- default sink set for newly created loggers,
-- per-logger runtime level updates,
-- per-logger sink replacement.
-
-## Performance Guidance
-
-For lowest overhead:
-- Prefer lazy builder APIs in hot paths.
-- Keep expensive computation inside lambda body.
-- Use `*f` / `*fv` for convenience and non-critical paths.
-- Avoid frequent sink reconfiguration in tight loops.
-- Use `AsyncSink` when producer tail latency matters more than guaranteed durability under saturation.
-
-## Examples And Benchmarks
-
-- Example app: `NGIN.Log/examples/BasicLogging/main.cpp`
-- Benchmarks: `NGIN.Log/benchmarks/LoggingBenchmarks.cpp`
-
-## More Documentation
-
-- [Documentation Index](./docs/README.md)
-- [API Reference Guide](./docs/API.md)
-- [Architecture Notes](./docs/Architecture.md)
-- [Sinks Guide](./docs/Sinks.md)
+- [Documentation Index](docs/README.md)
+- [API Reference Guide](docs/API.md)
+- [Architecture Notes](docs/Architecture.md)
+- [Sinks Guide](docs/Sinks.md)
