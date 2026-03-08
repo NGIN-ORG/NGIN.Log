@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config"
+    },
+    {
+      "name": "tests",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/tests",
+      "cacheVariables": {
+        "NGIN_LOG_BUILD_TESTS": "ON",
+        "NGIN_LOG_BUILD_EXAMPLES": "OFF",
+        "NGIN_LOG_BUILD_BENCHMARKS": "OFF",
+        "NGIN_LOG_BUILD_STATIC": "ON"
+      }
+    },
+    {
+      "name": "benchmarks",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/benchmarks",
+      "cacheVariables": {
+        "NGIN_LOG_BUILD_TESTS": "OFF",
+        "NGIN_LOG_BUILD_EXAMPLES": "OFF",
+        "NGIN_LOG_BUILD_BENCHMARKS": "ON",
+        "NGIN_LOG_BUILD_STATIC": "ON"
+      }
+    },
+    {
+      "name": "examples",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/examples",
+      "cacheVariables": {
+        "NGIN_LOG_BUILD_TESTS": "OFF",
+        "NGIN_LOG_BUILD_EXAMPLES": "ON",
+        "NGIN_LOG_BUILD_BENCHMARKS": "OFF",
+        "NGIN_LOG_BUILD_STATIC": "ON"
+      }
+    }
+  ]
+}

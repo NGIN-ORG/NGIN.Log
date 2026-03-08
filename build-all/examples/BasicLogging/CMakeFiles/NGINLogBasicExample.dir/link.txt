@@ -1,0 +1,1 @@
+/opt/gcc-15.2/bin/c++ CMakeFiles/NGINLogBasicExample.dir/main.cpp.o -o NGINLogBasicExample  ../../libNGINLog.a ../../_ngin_base/libNGINBase.a 
