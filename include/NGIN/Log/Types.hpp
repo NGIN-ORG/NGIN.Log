@@ -14,17 +14,14 @@
 
 namespace NGIN::Log
 {
-    /// @brief Supported structured attribute value types.
     using AttributeValue = std::variant<NGIN::Int64, NGIN::UInt64, double, bool, std::string_view>;
 
-    /// @brief Single key-value log attribute.
     struct LogAttribute
     {
         std::string_view key {};
         AttributeValue   value {};
     };
 
-    /// @brief Immutable view of a log record dispatched to sinks.
     struct LogRecordView
     {
         NGIN::UInt64                  timestampEpochNanoseconds {0};
@@ -38,12 +35,9 @@ namespace NGIN::Log
         NGIN::UInt32                  truncatedBytes {0};
     };
 
-    /// @brief Fixed-capacity inline UTF-8 text storage used by async-owned records.
-    /// @tparam Capacity Maximum storable character bytes excluding null terminator.
     template<std::size_t Capacity>
     struct InlineText
     {
-        /// @brief Copy bounded text into inline storage and accumulate truncated bytes.
         void Assign(const std::string_view input, NGIN::UInt32& truncatedBytes) noexcept
         {
             const auto copyLength = std::min<std::size_t>(input.size(), Capacity);
@@ -61,7 +55,6 @@ namespace NGIN::Log
             }
         }
 
-        /// @brief Convert to string view.
         [[nodiscard]] auto View() const noexcept -> std::string_view
         {
             return std::string_view(buffer.data(), size);
@@ -71,18 +64,15 @@ namespace NGIN::Log
         std::size_t                    size {0};
     };
 
-    /// @brief Owned attribute value used by async sink queue records.
     using OwnedAttributeValue =
         std::variant<std::monostate, NGIN::Int64, NGIN::UInt64, double, bool, InlineText<Config::MaxAttrTextBytes>>;
 
-    /// @brief Owned key-value pair used by async sink queue records.
     struct OwnedLogAttribute
     {
         InlineText<Config::MaxAttrTextBytes> key {};
-        OwnedAttributeValue value {};
+        OwnedAttributeValue                  value {};
     };
 
-    /// @brief Owned log record for async queue transport.
     struct OwnedLogRecord
     {
         NGIN::UInt64                                         timestampEpochNanoseconds {0};

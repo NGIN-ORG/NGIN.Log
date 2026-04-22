@@ -6,19 +6,19 @@ This folder contains implementation-aligned documentation for `NGIN.Log`.
 
 - [API Guide](./API.md)
   - Public types and logger APIs
-  - `*f` and `*fv` usage patterns
-  - Registry usage
+  - direct-message, builder, and formatted call styles
+  - context, registry, formatter, and async options
 
 - [Architecture](./Architecture.md)
   - Dispatch flow
-  - Compile-time/runtime filtering model
-  - Sink generation publication model
-  - Async materialization and queue behavior
+  - compile-time/runtime filtering model
+  - sink snapshot publication model
+  - context merge and async delivery behavior
 
 - [Sinks](./Sinks.md)
   - `ILogSink` contract
-  - Built-in sinks (`NullSink`, `ConsoleSink`, `FileSink`, `AsyncSink`)
-  - Operational behavior and failure model
+  - built-in sinks and formatter split
+  - rotating-file and async operational behavior
 
 ## Recommended Read Order
 

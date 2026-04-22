@@ -1,35 +1,35 @@
 #pragma once
 
-#include <NGIN/Log/Export.hpp>
+#include <NGIN/Log/RecordFormatter.hpp>
 #include <NGIN/Log/Sink.hpp>
 
 #include <mutex>
+#include <string>
 
 namespace NGIN::Log
 {
-    /// @brief Console sink configuration.
     struct ConsoleSinkOptions
     {
-        bool useStderrForErrors {true};
-        bool includeSource {true};
-        bool autoFlush {false};
+        bool               useStderrForErrors {true};
+        bool               includeSource {true};
+        bool               autoFlush {false};
+        RecordFormatterPtr formatter {};
     };
 
-    /// @brief Thread-safe console sink.
     class NGIN_LOG_API ConsoleSink final : public ILogSink
     {
     public:
-        /// @brief Construct console sink with options.
         explicit ConsoleSink(ConsoleSinkOptions options = {}) noexcept;
 
-        /// @brief Write record to stdout/stderr.
         void Write(const LogRecordView& record) noexcept override;
-
-        /// @brief Flush stdout/stderr.
         void Flush() noexcept override;
 
     private:
+        [[nodiscard]] static auto CreateDefaultFormatter(const ConsoleSinkOptions& options) noexcept -> RecordFormatterPtr;
+
         ConsoleSinkOptions m_options {};
+        RecordFormatterPtr m_formatter {};
         std::mutex         m_mutex {};
+        std::string        m_scratch {};
     };
 }

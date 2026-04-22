@@ -16,137 +16,108 @@ public:
 ```
 
 Expected behavior:
-- `Write` must consume record data synchronously with respect to record view lifetime.
-- `Flush` should push buffered data to underlying output.
-- methods are `noexcept`; sink internals should catch and absorb failures where needed.
+- `Write` must consume record data synchronously with respect to the `LogRecordView` lifetime
+- `Flush` pushes buffered data to the underlying output
+- methods are `noexcept`
 
-## Sink Construction
+## Formatter Construction
 
-Use `MakeSink<TSink>(...)`:
+Formatters are separate from transport sinks:
 
 ```cpp
-using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
-
-LoggerType::SinkSet sinks {};
-sinks.push_back(NGIN::Log::MakeSink<NGIN::Log::ConsoleSink>());
+auto json = NGIN::Log::MakeRecordFormatter<NGIN::Log::JsonRecordFormatter>();
 ```
 
-`MakeSink` returns:
-- `SinkPtr` (`NGIN::Memory::Shared<ILogSink>`)
-- empty pointer if allocation/construction fails
+Transport sinks default to `TextRecordFormatter` if no formatter is supplied.
 
 ## `NullSink`
 
 Purpose:
-- benchmark/control path,
-- disable output without changing call sites.
-
-Behavior:
-- `Write` no-op,
-- `Flush` no-op.
+- benchmark/control path
+- disable output without changing call sites
 
 ## `ConsoleSink`
 
-Options (`ConsoleSinkOptions`):
+Options:
 - `useStderrForErrors`
 - `includeSource`
 - `autoFlush`
+- `formatter`
 
 Behavior:
-- formats human-readable line output,
-- writes to stdout/stderr based on level/options,
-- internal mutex for thread-safe writes.
-
-Use cases:
-- local development,
-- diagnostics in short-lived tools.
+- formats into an internal scratch buffer
+- writes to stdout/stderr under a mutex
 
 ## `FileSink`
 
-Options (`FileSinkOptions`):
+Options:
 - `append`
 - `autoFlush`
+- `formatter`
 
 Behavior:
-- writes formatted lines to file,
-- thread-safe via internal mutex,
-- `Reopen()` allows manual reopen/rotation coordination.
+- formats into an internal scratch buffer
+- writes to one file handle under a mutex
+- supports `Reopen()` for manual reopen workflows
 
-Use cases:
-- persistent service logging,
-- integration with external log collectors tailing files.
+## `RotatingFileSink`
+
+Options:
+- `path`
+- `append`
+- `autoFlush`
+- `maxFileBytes`
+- `maxFiles`
+- `rotateAtStartup`
+- `rotateDailyLocal`
+- `detectExternalRotation`
+- `formatter`
+
+Behavior:
+- rotates by size and/or local-day boundary
+- maintains numbered retention files
+- can reopen if an external rotation is detected on supported platforms
 
 ## `AsyncSink<TSink, QueueCapacity, BatchSize>`
-
-Template parameters:
-- `TSink`: wrapped concrete sink type
-- `QueueCapacity`: bounded ring size, power-of-two
-- `BatchSize`: max dequeue batch per worker iteration
 
 Construction:
 
 ```cpp
-auto fileSink = NGIN::Memory::MakeScoped<NGIN::Log::FileSink>("app.log");
-auto async = NGIN::Log::MakeSink<NGIN::Log::AsyncSink<NGIN::Log::FileSink>>(std::move(fileSink));
+auto fileSink = NGIN::Memory::MakeScoped<NGIN::Log::RotatingFileSink>(
+    NGIN::Log::RotatingFileSinkOptions {.path = "app.log"});
+
+auto async = NGIN::Log::MakeSink<NGIN::Log::AsyncSink<NGIN::Log::RotatingFileSink>>(
+    std::move(fileSink),
+    NGIN::Log::AsyncSinkOptions {.overflowPolicy = NGIN::Log::AsyncOverflowPolicy::Block});
 ```
 
 Behavior:
-- producer `Write` enqueues owned payload,
-- on full queue: record dropped (producer never blocks),
-- worker thread drains queue and writes to wrapped sink,
-- periodic synthetic warning record reports dropped count.
+- producer `Write` copies the record into an owned inline payload
+- bounded queue keeps transport allocation-free after warmup
+- worker thread drains and writes to the wrapped sink
+- drop reporting is optional
 
-Counters:
-- `GetDroppedCount()`
-- `GetErrorCount()`
-- `GetEnqueuedCount()`
+Overflow policies:
+- `DropNewest`
+- `Block`
+- `BlockForTimeout`
+- `SyncFallback`
 
-Flush + shutdown:
-- `Flush` waits until queue drains, then flushes wrapped sink.
-- destruction stops worker, drains queue, and flushes.
+Stats:
+- `enqueued`
+- `delivered`
+- `dropped`
+- `timeoutDropped`
+- `fallbackWrites`
+- `errors`
+- `queueHighWatermark`
+- `currentApproxDepth`
 
-## Materialization And Lifetime
-
-Why materialization matters:
-- `LogRecordView` carries `string_view` and spans; source memory may be stack-local.
-
-`AsyncSink` resolves this by owning queued payload:
-- message/logger/attribute text copied into inline fixed-capacity buffers,
-- numeric/bool values copied by value,
-- safe cross-thread handoff with no dangling references.
-
-## Failure Policy
-
-Framework-level behavior on sink errors:
-- logger dispatch catches exceptions from sink `Write`/`Flush`,
-- increments sink error counters,
-- continues processing.
-
-Sink implementation guidance:
-- avoid recursive logging inside sink failure path,
-- keep `Write` as short and deterministic as practical.
-
-## Choosing Sink Topologies
+## Choosing Topologies
 
 Typical patterns:
-- Development: `ConsoleSink`
-- Production simple: `FileSink`
-- Production latency-sensitive: `AsyncSink<FileSink>`
-- Multi-destination: combine sink pointers in one `SinkSet`
-
-Fan-out example:
-
-```cpp
-LoggerType::SinkSet sinks {};
-sinks.push_back(NGIN::Log::MakeSink<NGIN::Log::ConsoleSink>());
-sinks.push_back(NGIN::Log::MakeSink<NGIN::Log::FileSink>("app.log"));
-```
-
-## Reconfiguration Guidance
-
-`Logger::SetSinks` is safe during concurrent logging, but:
-- reconfiguration is write-synchronized,
-- old sink generations stay alive until logger destruction.
-
-Recommendation:
-- treat sink reconfiguration as operational control path, not hot path.
+- development: `ConsoleSink`
+- production text file: `FileSink`
+- production structured file: `RotatingFileSink` + `JsonRecordFormatter`
+- latency-sensitive file logging: `AsyncSink<RotatingFileSink>`
+- multi-destination fan-out: combine sinks in one `SinkSet`

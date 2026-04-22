@@ -5,109 +5,98 @@ This document describes runtime behavior and performance-relevant design decisio
 ## High-Level Flow
 
 Application call site:
-1. Choose static level at call site (`Log<Level>` or `Trace/Debug/...` helpers).
-2. Apply compile-time filtering (`if constexpr` against `CompileTimeMin`).
-3. Apply runtime level filtering (`m_runtimeMin` atomic).
-4. Materialize a bounded `RecordBuilder` on the stack.
-5. Build message/attributes (lazy lambda or formatter policy path).
-6. Dispatch immutable `LogRecordView` to active sinks.
+1. choose a static level at the call site
+2. apply compile-time filtering
+3. apply runtime level filtering
+4. materialize a bounded `RecordBuilder`
+5. merge thread-local context with builder attributes
+6. dispatch one immutable `LogRecordView` to the active sink snapshot
 
-## Compile-Time + Runtime Filtering Model
+## Compile-Time + Runtime Filtering
 
-For a logger `Logger<CompileTimeMin>`:
-- If `call_level < CompileTimeMin`: call site is compiled out.
-- Else: call site remains and is checked against runtime minimum.
+For `Logger<CompileTimeMin>`:
+- calls below `CompileTimeMin` compile out
+- enabled calls still check the logger runtime minimum
 
-This yields:
-- predictable dead-stripping for disabled low levels,
-- dynamic control for enabled levels.
+This keeps dead-stripping predictable while preserving live operational control.
 
 ## Sink Publication Model
 
-`Logger` stores sink sets as immutable generations:
-- active generation pointer is stored atomically,
-- dispatch path loads active generation and iterates without locking,
-- `SetSinks` acquires write mutex and publishes a new generation pointer.
+`Logger` publishes sinks through an atomic `std::shared_ptr<const SinkSet>` snapshot.
 
-Generation lifetime:
-- previous generations remain owned by logger until logger destruction.
-- this avoids use-after-free for concurrent readers.
-
-Operational implication:
-- extremely frequent `SetSinks` calls can grow retained generation memory.
-- configuration churn should be infrequent relative to log dispatch.
-
-## Dispatch Error Model
-
-Public APIs are `noexcept`.
-
-If sink operations throw:
-- logger catches exceptions,
-- increments sink error counter,
-- continues dispatching remaining sinks.
-
-Recursion guard:
-- thread-local dispatch flag prevents recursive log re-entry loops.
+Implications:
+- dispatch reads are lock-free at the logger level
+- `SetSinks` publishes a replacement snapshot without retaining every historical generation forever
+- old snapshots disappear automatically when no dispatch path still references them
 
 ## Record Materialization
 
 `RecordBuilder` is bounded and stack-based:
-- message buffer size: `Config::MaxMessageBytes`
-- max attributes: `Config::MaxAttributes`
-- inline attribute text pool: `Config::MaxAttrTextBytes`
+- message storage: `Config::MaxMessageBytes`
+- attribute count: `Config::MaxAttributes`
+- attribute text pool: `Config::MaxAttrTextBytes`
 
-Overflow is not fatal:
-- excess attributes dropped, counted,
-- excess text bytes truncated, counted.
+Overflow is non-fatal:
+- excess attributes are counted
+- excess text bytes are truncated and counted
 
-## Async Sink Architecture
+## Context Merge Model
+
+Scoped log context is thread-local.
+
+Merge order:
+1. outer context scopes
+2. inner context scopes
+3. per-record attributes
+
+If the same key appears multiple times, the later value wins in the final dispatched record.
+
+## Formatter / Transport Split
+
+`ConsoleSink`, `FileSink`, and `RotatingFileSink` are transport sinks.
+They hold a reusable scratch buffer and delegate output rendering to an `IRecordFormatter`.
+
+Built-in formatter styles:
+- human-readable text
+- JSON
+- logfmt
+
+This separation keeps destination concerns independent from wire shape concerns.
+
+## Async Sink Behavior
 
 `AsyncSink<TSink>`:
-- wraps a concrete sink,
-- uses bounded MPSC ring queue,
-- single consumer worker thread,
-- drains in batches (`BatchSize` template parameter),
-- drop-on-full policy for producer protection.
+- owns a concrete wrapped sink
+- copies `LogRecordView` into an owned inline record representation
+- moves those owned records through a fixed-capacity bounded queue
+- drains them on a worker thread
 
-Producer path characteristics:
-- converts `LogRecordView` into owned inline payload,
-- fixed-size copies for message/logger/attribute text,
-- queue CAS operations,
-- no producer-side heap allocation for record materialization.
-
-Consumer path:
-- converts owned payload back to `LogRecordView`,
-- calls wrapped sink `Write`,
-- periodically emits dropped-record synthetic warning lines.
+Producer-side overflow behavior is configurable:
+- drop newest
+- block
+- block with timeout
+- synchronous fallback delivery
 
 Flush semantics:
-- waits until queue is empty and pending count is zero,
-- then flushes wrapped sink.
+- wait until queued-or-inflight work reaches zero
+- emit any pending drop report if enabled
+- flush the wrapped sink
 
-## Formatting Paths
+## Failure Model
 
-1. Lazy builder path:
-- user constructs message in lambda.
-- best control for hot-path behavior.
+Public APIs are `noexcept`.
 
-2. `*f` path (`std::format_string`):
-- compile-time format checking.
+If a sink or formatter throws:
+- the logger or async sink catches the exception
+- increments the relevant error counter
+- continues operating where possible
 
-3. `*fv` path (`std::string_view` + `std::format_args`):
-- runtime format support,
-- implemented via `std::vformat` in `RecordBuilder::VFormat`,
-- may allocate internally.
+## Output Safety
 
-## Threading Summary
+Built-in formatters escape control characters so one logical record remains one physical line for text and logfmt output.
 
-- Logging API is safe for concurrent producer threads.
-- Sink thread-safety is sink-specific.
-- `ConsoleSink` and `FileSink` serialize internal writes with mutexes.
-- `AsyncSink` decouples producers from sink I/O by queueing.
-
-## Why Explicit Source For `*f` / `*fv`
-
-Without macros, wrapper-based convenience overloads cannot guarantee true call-site source metadata in a portable way.
-NGIN.Log therefore requires explicit source for formatting APIs to preserve correctness.
-
-Lazy builder helpers (`Trace/Debug/...`) still default source at the direct call site.
+Timestamp rendering is formatter-controlled:
+- `EpochNanoseconds`
+- `EpochMilliseconds`
+- `Iso8601Utc`
+- `Iso8601Local`

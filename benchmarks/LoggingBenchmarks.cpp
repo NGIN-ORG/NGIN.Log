@@ -3,7 +3,6 @@
 #include <chrono>
 #include <iostream>
 #include <source_location>
-#include <thread>
 
 namespace
 {
@@ -37,10 +36,17 @@ int main()
     FullLogger enabled("Bench.Enabled", NGIN::Log::LogLevel::Trace, std::move(fullSinks));
 
     FullLogger::SinkSet asyncSinks {};
-    auto fileSink = NGIN::Memory::MakeScoped<NGIN::Log::FileSink>(
-        "ngin.log.bench",
-        NGIN::Log::FileSinkOptions {.append = false, .autoFlush = false});
-    asyncSinks.push_back(NGIN::Log::MakeSink<NGIN::Log::AsyncSink<NGIN::Log::FileSink>>(std::move(fileSink)));
+    auto rotatingSink = NGIN::Memory::MakeScoped<NGIN::Log::RotatingFileSink>(NGIN::Log::RotatingFileSinkOptions {
+        .path = "ngin.log.bench",
+        .append = false,
+        .autoFlush = false,
+        .maxFileBytes = 8 * 1024 * 1024,
+        .maxFiles = 2,
+        .formatter = NGIN::Log::MakeRecordFormatter<NGIN::Log::JsonRecordFormatter>(),
+    });
+    asyncSinks.push_back(NGIN::Log::MakeSink<NGIN::Log::AsyncSink<NGIN::Log::RotatingFileSink>>(
+        std::move(rotatingSink),
+        NGIN::Log::AsyncSinkOptions {.overflowPolicy = NGIN::Log::AsyncOverflowPolicy::Block}));
     FullLogger asyncLogger("Bench.Async", NGIN::Log::LogLevel::Trace, std::move(asyncSinks));
 
     constexpr int iterations = 200000;
@@ -52,7 +58,7 @@ int main()
         });
     });
 
-    Benchmark("enabled-info-null-sink", iterations, [&](int i) {
+    Benchmark("enabled-info-direct-message-null-sink", iterations, [&](int i) {
         enabled.Info([&](NGIN::Log::RecordBuilder& rec) {
             rec.Message("hot-path");
             rec.Attr("i", static_cast<NGIN::Int64>(i));
@@ -63,12 +69,16 @@ int main()
         enabled.Infof(std::source_location::current(), "value={} status={}", i, "ok");
     });
 
-    Benchmark("enabled-async-file", 100000, [&](int i) {
+    Benchmark("enabled-contextual-null-sink", iterations, [&](int i) {
+        auto scope = NGIN::Log::PushLogContext({{"bench", "context"}, {"iteration", i}});
+        enabled.Warn("contextual");
+        (void)scope;
+    });
+
+    Benchmark("enabled-async-rotating-json", 100000, [&](int i) {
         asyncLogger.Infof(std::source_location::current(), "async value={}", i);
     });
 
     asyncLogger.Flush();
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
     return 0;
 }

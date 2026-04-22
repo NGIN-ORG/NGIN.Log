@@ -1,18 +1,15 @@
 # NGIN.Log API Guide
 
-This guide describes the public API surface in `include/NGIN/Log`.
+This guide describes the current public API surface in `include/NGIN/Log`.
 
-## Header Entry Point
+## Header Entry Points
 
-Use umbrella include for most applications:
-
-```cpp
-#include <NGIN/Log/Log.hpp>
-```
+- `#include <NGIN/Log/Log.hpp>` for the main API
+- `#include <NGIN/Log/Macros.hpp>` for optional source-capturing format macros
 
 ## Core Types
 
-## `LogLevel`
+### `LogLevel`
 
 `enum class LogLevel : NGIN::UInt8`
 
@@ -28,9 +25,9 @@ Levels:
 Utility:
 - `ToString(LogLevel) -> std::string_view`
 
-## `LogAttribute` and `LogRecordView`
+### `LogAttribute` and `LogRecordView`
 
-Attribute value supports:
+Attribute values on the transport path remain:
 - `NGIN::Int64`
 - `NGIN::UInt64`
 - `double`
@@ -44,7 +41,7 @@ Attribute value supports:
 - `message`
 - `source`
 - `threadIdHash`
-- `attributes` (`std::span<const LogAttribute>`)
+- `attributes`
 - `truncatedAttributeCount`
 - `truncatedBytes`
 
@@ -53,40 +50,61 @@ Attribute value supports:
 Stack-only bounded builder:
 - `Message(std::string_view)`
 - `Format(std::format_string<Args...>, Args&&...)`
-- `VFormat(std::string_view, std::format_args)` (runtime format, may allocate internally)
-- `Attr(std::string_view key, const AttributeValue&)`
+- `VFormat(std::string_view, std::format_args)`
+- `Attr(std::string_view key, TValue&& value)`
+
+Normalized attribute inputs now include:
+- signed and unsigned integrals
+- floating-point values
+- `bool`
+- enums
+- `std::string_view`, `const char*`, `std::string`
+- `std::error_code`
+- `std::chrono::duration`
+- pointers
 
 Bounded behavior:
 - message text capped by `Config::MaxMessageBytes`
 - attributes capped by `Config::MaxAttributes`
-- attribute string text pooled in bounded inline storage (`Config::MaxAttrTextBytes`)
+- attribute string text pooled in bounded inline storage
 
-Truncation counters:
-- `GetTruncatedAttributeCount()`
-- `GetTruncatedBytes()`
+## Scoped Context
 
-## Sink Interfaces
+- `using ContextValue = std::variant<...>`
+- `struct ContextAttribute`
+- `ScopedLogContext PushLogContext(std::initializer_list<ContextAttribute>)`
 
-## `ILogSink`
+Context is thread-local. Merge order is:
+1. outer scopes
+2. inner scopes
+3. per-record attributes
 
-Virtual sink contract:
-- `Write(const LogRecordView&) noexcept`
-- `Flush() noexcept`
+Later duplicate keys win.
+
+## Formatter API
+
+### `IRecordFormatter`
+
+Virtual formatter contract:
+- `Format(const LogRecordView&, std::string& output) noexcept`
 
 Helpers:
-- `NullSink` (drops records)
-- `MakeSink<TSink>(...) -> SinkPtr`
+- `MakeRecordFormatter<TFormatter>(...) -> RecordFormatterPtr`
 
-`SinkPtr`:
-- `using SinkPtr = NGIN::Memory::Shared<ILogSink>;`
+Built-in formatters:
+- `TextRecordFormatter`
+- `JsonRecordFormatter`
+- `LogFmtRecordFormatter`
+
+Timestamp rendering styles:
+- `EpochNanoseconds`
+- `EpochMilliseconds`
+- `Iso8601Utc`
+- `Iso8601Local`
 
 ## `Logger<CompileTimeMin, FormatterPolicy>`
 
 Main logging type.
-
-Template params:
-- `CompileTimeMin`: call sites below this level compile out via `if constexpr`.
-- `FormatterPolicy`: formatting backend policy (`StdFormatter` default).
 
 Key API:
 - `SetRuntimeMin(LogLevel)`
@@ -96,76 +114,81 @@ Key API:
 - `Flush()`
 - `GetSinkErrorCount()`
 
-Lazy logging:
+Logging styles:
 - `Log<Level>(fn, source = current())`
-- `Trace/Debug/Info/Warn/Error/Fatal`
-
-Format-checked logging (`std::format_string`):
-- `Logf<Level>(std::source_location, std::format_string<...>, ...)`
-- `Tracef/Debugf/Infof/Warnf/Errorf/Fatalf`
-
-Runtime format logging (`std::format_args`):
-- `Logfv<Level>(std::source_location, std::string_view, std::format_args)`
-- `Tracefv/Debugfv/Infofv/Warnfv/Errorfv/Fatalfv`
+- direct message overloads: `Trace/Debug/Info/Warn/Error/Fatal(std::string_view, source = current())`
+- builder overloads: `Trace/Debug/Info/Warn/Error/Fatal(fn, source = current())`
+- format helpers: `Tracef/Debugf/...`
+- runtime format helpers: `Tracefv/Debugfv/...`
 
 Important source rule:
-- `*f` and `*fv` require explicit `std::source_location` argument.
+- class-based `*f` and `*fv` APIs require explicit `std::source_location`
+- optional macros in `NGIN/Log/Macros.hpp` forward the call-site source automatically
 
-## `LoggerRegistry`
+## Registry API
 
-Named logger registry with thread-safe access:
+### `BasicLoggerRegistry<CompileTimeMin, FormatterPolicy>`
+
+Main registry type. Backward-compatible alias:
+- `using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace, StdFormatter>;`
+
+Supporting types:
+- `LoggerConfig`
+- `LoggerRule`
+
+Key API:
 - `GetOrCreate(name, runtimeMin)`
 - `Get(name)`
-- `SetDefaultSinks(SinkSet)`
+- `SetDefaultRuntimeMin(level)`
+- `SetDefaultSinks(sinks)`
+- `GetDefaultRuntimeMin()`
 - `GetDefaultSinks()`
+- `UpsertRule(rule)`
+- `RemoveRule(prefix)`
+- `GetEffectiveConfig(name)`
 - `SetLoggerRuntimeMin(name, level)`
 - `ReplaceLoggerSinks(name, sinks)`
 - `GetLoggerNames()`
 
-## Built-in Sinks
+Rule matching uses the longest dot-delimited prefix.
 
+## Sinks
+
+Core sink contract:
+- `Write(const LogRecordView&) noexcept`
+- `Flush() noexcept`
+
+Built-in sinks:
+- `NullSink`
 - `ConsoleSink`
 - `FileSink`
+- `RotatingFileSink`
 - `AsyncSink<TSink, QueueCapacity, BatchSize>`
 
-`AsyncSink` wraps a concrete sink allocated as `NGIN::Memory::Scoped<TSink>`.
+### `AsyncSink`
 
-## API Usage Patterns
+Options:
+- `overflowPolicy`
+- `blockTimeout`
+- `emitDropReports`
+- `notifyOnError`
 
-## Preferred hot-path pattern
+Overflow policies:
+- `DropNewest`
+- `Block`
+- `BlockForTimeout`
+- `SyncFallback`
 
-```cpp
-logger.Info([&](NGIN::Log::RecordBuilder& rec) {
-    rec.Message("request complete");
-    rec.Attr("status", static_cast<NGIN::Int64>(200));
-});
-```
-
-## Compile-time format-checked path
-
-```cpp
-logger.Warnf(
-    std::source_location::current(),
-    "latency_ms={} endpoint={}",
-    latencyMs,
-    endpoint);
-```
-
-## Dynamic format string path
-
-```cpp
-std::string fmt = "payload={} retries={}";
-int         retries = 2;
-logger.Debugfv(
-    std::source_location::current(),
-    fmt,
-    std::make_format_args(payload, retries));
-```
+Stats:
+- `GetStats()`
+- `GetDroppedCount()`
+- `GetErrorCount()`
+- `GetEnqueuedCount()`
 
 ## API Contracts And Caveats
 
-- Public logging APIs are `noexcept`.
-- Sink exceptions are swallowed and counted as sink errors.
-- Re-entrant dispatch is guarded by thread-local recursion check.
-- `std::format_args` references passed lvalues; keep arguments alive through the logging call.
-- Runtime format (`*fv`) is convenience-focused and may allocate due to `std::vformat`.
+- Public logging APIs are `noexcept`
+- sink exceptions are swallowed and counted
+- re-entrant dispatch is guarded by a thread-local recursion check
+- dynamic format (`*fv`) may allocate due to `std::vformat`
+- context propagation is thread-local only

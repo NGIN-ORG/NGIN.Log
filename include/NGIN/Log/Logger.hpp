@@ -1,18 +1,19 @@
 #pragma once
 
 #include <NGIN/Defines.hpp>
+#include <NGIN/Log/Context.hpp>
 #include <NGIN/Log/FormatterPolicy.hpp>
 #include <NGIN/Log/LogLevel.hpp>
 #include <NGIN/Log/RecordBuilder.hpp>
 #include <NGIN/Log/Sink.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <deque>
 #include <format>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -23,10 +24,6 @@
 
 namespace NGIN::Log
 {
-    /// @brief Logger with compile-time and runtime filtering and lock-free sink read fan-out.
-    /// @details Sink dispatch reads are lock-free; sink reconfiguration synchronizes on write path.
-    /// @tparam CompileTimeMin Compile-time minimum level.
-    /// @tparam TFormatterPolicy Formatting policy backend.
     template<LogLevel CompileTimeMin, class TFormatterPolicy = StdFormatter>
     class Logger
     {
@@ -34,10 +31,6 @@ namespace NGIN::Log
         using FormatterPolicy = TFormatterPolicy;
         using SinkSet         = std::vector<SinkPtr>;
 
-        /// @brief Construct a logger with initial runtime level and sink set.
-        /// @param name Logger name.
-        /// @param runtimeMin Runtime minimum enabled level.
-        /// @param sinks Initial sinks.
         explicit Logger(
             std::string name,
             const LogLevel runtimeMin = LogLevel::Info,
@@ -45,67 +38,48 @@ namespace NGIN::Log
             : m_name(std::move(name))
             , m_runtimeMin(static_cast<NGIN::UInt8>(runtimeMin))
         {
-            m_sinkGenerations.emplace_back(std::move(sinks));
-            m_activeSinks.store(&m_sinkGenerations.back(), std::memory_order_release);
+            PublishSinkSnapshot(std::move(sinks));
         }
 
-        /// @brief Set runtime minimum level.
         void SetRuntimeMin(const LogLevel level) noexcept
         {
             m_runtimeMin.store(static_cast<NGIN::UInt8>(level), std::memory_order_release);
         }
 
-        /// @brief Read runtime minimum level.
         [[nodiscard]] auto GetRuntimeMin() const noexcept -> LogLevel
         {
             return static_cast<LogLevel>(m_runtimeMin.load(std::memory_order_acquire));
         }
 
-        /// @brief Replace sink set by publishing a new immutable generation.
-        /// @param sinks New sink set snapshot.
         void SetSinks(SinkSet sinks) noexcept
         {
-            try
-            {
-                std::lock_guard lock(m_sinkMutationMutex);
-                m_sinkGenerations.emplace_back(std::move(sinks));
-                m_activeSinks.store(&m_sinkGenerations.back(), std::memory_order_release);
-            }
-            catch (...)
-            {
-                m_sinkErrorCount.fetch_add(1, std::memory_order_relaxed);
-            }
+            PublishSinkSnapshot(std::move(sinks));
         }
 
-        /// @brief Get a copy of the currently active sink set.
         [[nodiscard]] auto GetSinksSnapshot() const -> SinkSet
         {
-            const auto* sinks = m_activeSinks.load(std::memory_order_acquire);
-            if (sinks == nullptr)
+            if (const auto snapshot = GetActiveSinkSnapshot())
             {
-                return {};
+                return *snapshot;
             }
 
-            return *sinks;
+            return {};
         }
 
-        /// @brief Logger name.
         [[nodiscard]] auto GetName() const noexcept -> std::string_view
         {
             return m_name;
         }
 
-        /// @brief Number of sink-dispatch failures observed by this logger.
         [[nodiscard]] auto GetSinkErrorCount() const noexcept -> NGIN::UInt64
         {
             return m_sinkErrorCount.load(std::memory_order_relaxed);
         }
 
-        /// @brief Flush all currently active sinks.
         void Flush() noexcept
         {
-            const auto* sinks = m_activeSinks.load(std::memory_order_acquire);
-            if (sinks == nullptr)
+            const auto sinks = GetActiveSinkSnapshot();
+            if (!sinks)
             {
                 return;
             }
@@ -128,13 +102,6 @@ namespace NGIN::Log
             }
         }
 
-        /// @brief Primary zero-overhead lazy API.
-        /// @tparam L Call-site static log level.
-        /// @tparam Fn Callable invoked only when level is enabled.
-        /// @param fn Callable accepting `RecordBuilder&` or zero args.
-        /// @param source Source location captured at call site.
-        /// @details Calls below `CompileTimeMin` are compiled out via `if constexpr`.
-        /// Calls at/above `CompileTimeMin` are additionally filtered by runtime minimum level.
         template<LogLevel L, class Fn>
         NGIN_FORCEINLINE void Log(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
@@ -168,9 +135,6 @@ namespace NGIN::Log
             }
         }
 
-        /// @brief Formatting API with explicit source location.
-        /// @note `*f` APIs evaluate formatting arguments regardless of level checks.
-        /// @note Explicit source is required for accurate caller metadata in macro-free code.
         template<LogLevel L, class... Args>
         NGIN_FORCEINLINE void Logf(
             const std::source_location source,
@@ -184,8 +148,6 @@ namespace NGIN::Log
                 source);
         }
 
-        /// @brief Runtime-format API with explicit source location.
-        /// @note This dynamic-format path may allocate inside `std::vformat`.
         template<LogLevel L>
         NGIN_FORCEINLINE void Logfv(
             const std::source_location source,
@@ -199,49 +161,78 @@ namespace NGIN::Log
                 source);
         }
 
-        /// @brief Trace-level lazy logging.
+        NGIN_FORCEINLINE void Trace(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Trace>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Trace(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Trace>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Debug-level lazy logging.
+        NGIN_FORCEINLINE void Debug(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Debug>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Debug(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Debug>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Info-level lazy logging.
+        NGIN_FORCEINLINE void Info(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Info>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Info(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Info>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Warn-level lazy logging.
+        NGIN_FORCEINLINE void Warn(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Warn>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Warn(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Warn>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Error-level lazy logging.
+        NGIN_FORCEINLINE void Error(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Error>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Error(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Error>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Fatal-level lazy logging.
+        NGIN_FORCEINLINE void Fatal(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
+        {
+            Log<LogLevel::Fatal>([message](RecordBuilder& builder) { builder.Message(message); }, source);
+        }
+
         template<class Fn>
+            requires(std::is_invocable_v<Fn&, RecordBuilder&> || std::is_invocable_v<Fn&>)
         NGIN_FORCEINLINE void Fatal(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Fatal>(std::forward<Fn>(fn), source);
         }
 
-        /// @brief Trace-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Tracef(
             const std::source_location source,
@@ -251,7 +242,6 @@ namespace NGIN::Log
             Logf<LogLevel::Trace>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Trace-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Tracefv(
             const std::source_location source,
             const std::string_view fmt,
@@ -260,7 +250,6 @@ namespace NGIN::Log
             Logfv<LogLevel::Trace>(source, fmt, args);
         }
 
-        /// @brief Debug-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Debugf(
             const std::source_location source,
@@ -270,7 +259,6 @@ namespace NGIN::Log
             Logf<LogLevel::Debug>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Debug-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Debugfv(
             const std::source_location source,
             const std::string_view fmt,
@@ -279,7 +267,6 @@ namespace NGIN::Log
             Logfv<LogLevel::Debug>(source, fmt, args);
         }
 
-        /// @brief Info-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Infof(
             const std::source_location source,
@@ -289,7 +276,6 @@ namespace NGIN::Log
             Logf<LogLevel::Info>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Info-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Infofv(
             const std::source_location source,
             const std::string_view fmt,
@@ -298,7 +284,6 @@ namespace NGIN::Log
             Logfv<LogLevel::Info>(source, fmt, args);
         }
 
-        /// @brief Warn-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Warnf(
             const std::source_location source,
@@ -308,7 +293,6 @@ namespace NGIN::Log
             Logf<LogLevel::Warn>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Warn-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Warnfv(
             const std::source_location source,
             const std::string_view fmt,
@@ -317,7 +301,6 @@ namespace NGIN::Log
             Logfv<LogLevel::Warn>(source, fmt, args);
         }
 
-        /// @brief Error-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Errorf(
             const std::source_location source,
@@ -327,7 +310,6 @@ namespace NGIN::Log
             Logf<LogLevel::Error>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Error-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Errorfv(
             const std::source_location source,
             const std::string_view fmt,
@@ -336,7 +318,6 @@ namespace NGIN::Log
             Logfv<LogLevel::Error>(source, fmt, args);
         }
 
-        /// @brief Fatal-level formatting helper with explicit source.
         template<class... Args>
         NGIN_FORCEINLINE void Fatalf(
             const std::source_location source,
@@ -346,7 +327,6 @@ namespace NGIN::Log
             Logf<LogLevel::Fatal>(source, fmt, std::forward<Args>(args)...);
         }
 
-        /// @brief Fatal-level runtime-format helper with explicit source.
         NGIN_FORCEINLINE void Fatalfv(
             const std::source_location source,
             const std::string_view fmt,
@@ -356,6 +336,22 @@ namespace NGIN::Log
         }
 
     private:
+        struct DispatchRecursionGuard
+        {
+            explicit DispatchRecursionGuard(bool& flag) noexcept
+                : m_flag(flag)
+            {
+                m_flag = true;
+            }
+
+            ~DispatchRecursionGuard()
+            {
+                m_flag = false;
+            }
+
+            bool& m_flag;
+        };
+
         [[nodiscard]] NGIN_FORCEINLINE auto IsRuntimeEnabled(const LogLevel level) const noexcept -> bool
         {
             const auto runtimeMin = m_runtimeMin.load(std::memory_order_acquire);
@@ -374,10 +370,79 @@ namespace NGIN::Log
             return static_cast<NGIN::UInt64>(std::hash<std::thread::id> {}(std::this_thread::get_id()));
         }
 
+        void PublishSinkSnapshot(SinkSet sinks) noexcept
+        {
+            try
+            {
+                m_activeSinks.store(std::make_shared<const SinkSet>(std::move(sinks)), std::memory_order_release);
+            }
+            catch (...)
+            {
+                m_sinkErrorCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        [[nodiscard]] auto GetActiveSinkSnapshot() const noexcept -> std::shared_ptr<const SinkSet>
+        {
+            return m_activeSinks.load(std::memory_order_acquire);
+        }
+
+        [[nodiscard]] static auto CopyContextText(
+            const std::string_view input,
+            std::array<char, Config::MaxAttrTextBytes * 2>& storage,
+            std::size_t& storageUsed,
+            NGIN::UInt32& truncatedBytes) noexcept -> std::string_view
+        {
+            if (input.empty())
+            {
+                return {};
+            }
+
+            const auto available = storage.size() - storageUsed;
+            if (available == 0)
+            {
+                truncatedBytes += static_cast<NGIN::UInt32>(input.size());
+                return {};
+            }
+
+            const auto copyLength = std::min(input.size(), available);
+            std::memcpy(storage.data() + storageUsed, input.data(), copyLength);
+            const auto view = std::string_view(storage.data() + storageUsed, copyLength);
+            storageUsed += copyLength;
+
+            if (input.size() > copyLength)
+            {
+                truncatedBytes += static_cast<NGIN::UInt32>(input.size() - copyLength);
+            }
+
+            return view;
+        }
+
+        [[nodiscard]] static auto CopyContextValue(
+            const ContextValue& value,
+            std::array<char, Config::MaxAttrTextBytes * 2>& storage,
+            std::size_t& storageUsed,
+            NGIN::UInt32& truncatedBytes) noexcept -> AttributeValue
+        {
+            return std::visit(
+                [&](const auto& contextValue) -> AttributeValue {
+                    using ContextType = std::decay_t<decltype(contextValue)>;
+                    if constexpr (std::same_as<ContextType, std::string>)
+                    {
+                        return CopyContextText(contextValue, storage, storageUsed, truncatedBytes);
+                    }
+                    else
+                    {
+                        return contextValue;
+                    }
+                },
+                value);
+        }
+
         void Dispatch(const LogLevel level, const RecordBuilder& builder, const std::source_location source) noexcept
         {
-            const auto* sinks = m_activeSinks.load(std::memory_order_acquire);
-            if (sinks == nullptr || sinks->empty())
+            const auto sinks = GetActiveSinkSnapshot();
+            if (!sinks || sinks->empty())
             {
                 return;
             }
@@ -388,7 +453,46 @@ namespace NGIN::Log
                 return;
             }
 
-            s_inDispatch = true;
+            DispatchRecursionGuard recursionGuard(s_inDispatch);
+
+            std::array<LogAttribute, Config::MaxAttributes> mergedAttributes {};
+            std::array<char, Config::MaxAttrTextBytes * 2>  contextTextStorage {};
+            std::size_t                                     mergedAttributeCount = 0;
+            std::size_t                                     contextTextUsed = 0;
+            NGIN::UInt32                                    truncatedAttributeCount = builder.GetTruncatedAttributeCount();
+            NGIN::UInt32                                    truncatedBytes = builder.GetTruncatedBytes();
+
+            const auto appendOrReplace = [&](const LogAttribute attribute) noexcept {
+                for (std::size_t i = 0; i < mergedAttributeCount; ++i)
+                {
+                    if (mergedAttributes[i].key == attribute.key)
+                    {
+                        mergedAttributes[i].value = attribute.value;
+                        return;
+                    }
+                }
+
+                if (mergedAttributeCount >= Config::MaxAttributes)
+                {
+                    ++truncatedAttributeCount;
+                    return;
+                }
+
+                mergedAttributes[mergedAttributeCount++] = attribute;
+            };
+
+            for (const auto& contextAttribute : detail::GetLogContextView())
+            {
+                appendOrReplace(LogAttribute {
+                    .key = CopyContextText(contextAttribute.key, contextTextStorage, contextTextUsed, truncatedBytes),
+                    .value = CopyContextValue(contextAttribute.value, contextTextStorage, contextTextUsed, truncatedBytes),
+                });
+            }
+
+            for (const auto& attribute : builder.GetAttributes())
+            {
+                appendOrReplace(attribute);
+            }
 
             const LogRecordView record {
                 .timestampEpochNanoseconds = NowEpochNanoseconds(),
@@ -397,9 +501,9 @@ namespace NGIN::Log
                 .message = builder.GetMessage(),
                 .source = source,
                 .threadIdHash = CurrentThreadHash(),
-                .attributes = builder.GetAttributes(),
-                .truncatedAttributeCount = builder.GetTruncatedAttributeCount(),
-                .truncatedBytes = builder.GetTruncatedBytes(),
+                .attributes = std::span<const LogAttribute>(mergedAttributes.data(), mergedAttributeCount),
+                .truncatedAttributeCount = truncatedAttributeCount,
+                .truncatedBytes = truncatedBytes,
             };
 
             for (const auto& sink : *sinks)
@@ -418,20 +522,13 @@ namespace NGIN::Log
                     m_sinkErrorCount.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-
-            s_inDispatch = false;
         }
 
         inline static thread_local bool s_inDispatch = false;
 
-        std::string                   m_name;
-        std::atomic<NGIN::UInt8>      m_runtimeMin {static_cast<NGIN::UInt8>(LogLevel::Info)};
-        std::atomic<const SinkSet*>   m_activeSinks {nullptr};
-
-        // Write-side generation ownership to keep published sink pointers valid for reader hot path.
-        mutable std::mutex            m_sinkMutationMutex {};
-        std::deque<SinkSet>           m_sinkGenerations {};
-
-        std::atomic<NGIN::UInt64>     m_sinkErrorCount {0};
+        std::string                       m_name;
+        std::atomic<NGIN::UInt8>          m_runtimeMin {static_cast<NGIN::UInt8>(LogLevel::Info)};
+        mutable std::atomic<std::shared_ptr<const SinkSet>> m_activeSinks {};
+        std::atomic<NGIN::UInt64>                        m_sinkErrorCount {0};
     };
 }

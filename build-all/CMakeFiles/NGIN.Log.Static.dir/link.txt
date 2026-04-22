@@ -1,2 +1,0 @@
-/usr/bin/ar qc libNGINLog.a CMakeFiles/NGIN.Log.Object.dir/src/NGIN/Log/LoggerRegistry.cpp.o CMakeFiles/NGIN.Log.Object.dir/src/NGIN/Log/Sinks/ConsoleSink.cpp.o CMakeFiles/NGIN.Log.Object.dir/src/NGIN/Log/Sinks/FileSink.cpp.o
-/usr/bin/ranlib libNGINLog.a

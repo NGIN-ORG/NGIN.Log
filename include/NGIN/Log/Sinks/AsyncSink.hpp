@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <source_location>
 #include <span>
@@ -25,11 +26,34 @@
 
 namespace NGIN::Log
 {
-    /// @brief Asynchronous sink wrapper with bounded MPSC queue and drop-on-full policy.
-    /// @details Producer-side `Write` performs fixed-size copies only and does not allocate.
-    /// @tparam TSink Wrapped sink type.
-    /// @tparam QueueCapacity Queue capacity (must be power of two).
-    /// @tparam BatchSize Max records drained per worker iteration.
+    enum class AsyncOverflowPolicy : NGIN::UInt8
+    {
+        DropNewest,
+        Block,
+        BlockForTimeout,
+        SyncFallback,
+    };
+
+    struct AsyncSinkOptions
+    {
+        AsyncOverflowPolicy                    overflowPolicy {AsyncOverflowPolicy::DropNewest};
+        std::chrono::milliseconds              blockTimeout {0};
+        bool                                   emitDropReports {true};
+        std::function<void(std::string_view)>  notifyOnError {};
+    };
+
+    struct AsyncSinkStats
+    {
+        NGIN::UInt64 enqueued {0};
+        NGIN::UInt64 delivered {0};
+        NGIN::UInt64 dropped {0};
+        NGIN::UInt64 timeoutDropped {0};
+        NGIN::UInt64 fallbackWrites {0};
+        NGIN::UInt64 errors {0};
+        NGIN::UInt64 queueHighWatermark {0};
+        NGIN::UInt64 currentApproxDepth {0};
+    };
+
     template<class TSink, std::size_t QueueCapacity = Config::AsyncQueueCapacity, std::size_t BatchSize = 64>
         requires std::derived_from<TSink, ILogSink>
     class AsyncSink final : public ILogSink
@@ -39,14 +63,13 @@ namespace NGIN::Log
         static_assert(BatchSize > 0, "BatchSize must be greater than zero");
 
     public:
-        /// @brief Construct async wrapper with owned wrapped sink.
-        explicit AsyncSink(NGIN::Memory::Scoped<TSink> sink) noexcept
+        explicit AsyncSink(NGIN::Memory::Scoped<TSink> sink, AsyncSinkOptions options = {}) noexcept
             : m_sink(std::move(sink))
+            , m_options(std::move(options))
         {
             m_worker = std::thread([this] { ConsumeLoop(); });
         }
 
-        /// @brief Shutdown and drain.
         ~AsyncSink() override
         {
             Shutdown();
@@ -55,150 +78,132 @@ namespace NGIN::Log
         AsyncSink(const AsyncSink&) = delete;
         auto operator=(const AsyncSink&) -> AsyncSink& = delete;
 
-        /// @brief Enqueue a record for asynchronous delivery without producer-side heap allocation.
         void Write(const LogRecordView& record) noexcept override
         {
+            if (!m_running.load(std::memory_order_acquire))
+            {
+                RecordDrop();
+                return;
+            }
+
             try
             {
                 auto owned = ToOwned(record);
-                if (!m_queue.TryEnqueue(std::move(owned)))
+                switch (m_options.overflowPolicy)
                 {
-                    m_totalDropped.fetch_add(1, std::memory_order_relaxed);
-                    m_unreportedDropped.fetch_add(1, std::memory_order_relaxed);
-                    return;
+                    case AsyncOverflowPolicy::DropNewest: EnqueueDropNewest(std::move(owned)); break;
+                    case AsyncOverflowPolicy::Block: EnqueueBlocking(std::move(owned)); break;
+                    case AsyncOverflowPolicy::BlockForTimeout: EnqueueBlockingWithTimeout(std::move(owned)); break;
+                    case AsyncOverflowPolicy::SyncFallback: EnqueueWithSyncFallback(std::move(owned)); break;
                 }
-
-                m_totalEnqueued.fetch_add(1, std::memory_order_relaxed);
-                m_pending.fetch_add(1, std::memory_order_release);
-                m_wakeCondition.notify_one();
             }
             catch (...)
             {
-                m_errorCount.fetch_add(1, std::memory_order_relaxed);
+                RecordError("async-write-failed");
             }
         }
 
-        /// @brief Block until queue is drained and wrapped sink is flushed.
         void Flush() noexcept override
         {
             {
                 std::unique_lock lock(m_flushMutex);
                 m_flushCondition.wait(lock, [this] {
-                    return m_pending.load(std::memory_order_acquire) == 0 && m_queue.IsEmpty();
+                    return m_outstanding.load(std::memory_order_acquire) == 0 && m_queue.IsEmpty();
                 });
             }
 
-            if (m_sink)
+            if (m_options.emitDropReports)
             {
-                try
-                {
-                    m_sink->Flush();
-                }
-                catch (...)
-                {
-                    m_errorCount.fetch_add(1, std::memory_order_relaxed);
-                }
+                std::lock_guard deliveryLock(m_deliveryMutex);
+                EmitDropReportIfNeededLocked();
             }
+
+            FlushWrappedSink();
         }
 
-        /// @brief Total number of dropped records.
+        [[nodiscard]] auto GetStats() const noexcept -> AsyncSinkStats
+        {
+            return AsyncSinkStats {
+                .enqueued = m_totalEnqueued.load(std::memory_order_relaxed),
+                .delivered = m_totalDelivered.load(std::memory_order_relaxed),
+                .dropped = m_totalDropped.load(std::memory_order_relaxed),
+                .timeoutDropped = m_timeoutDropped.load(std::memory_order_relaxed),
+                .fallbackWrites = m_fallbackWrites.load(std::memory_order_relaxed),
+                .errors = m_errorCount.load(std::memory_order_relaxed),
+                .queueHighWatermark = m_queueHighWatermark.load(std::memory_order_relaxed),
+                .currentApproxDepth = static_cast<NGIN::UInt64>(m_queue.ApproxDepth()),
+            };
+        }
+
         [[nodiscard]] auto GetDroppedCount() const noexcept -> NGIN::UInt64
         {
-            return m_totalDropped.load(std::memory_order_relaxed);
+            return GetStats().dropped;
         }
 
-        /// @brief Total number of sink errors.
         [[nodiscard]] auto GetErrorCount() const noexcept -> NGIN::UInt64
         {
-            return m_errorCount.load(std::memory_order_relaxed);
+            return GetStats().errors;
         }
 
-        /// @brief Total number of successfully enqueued records.
         [[nodiscard]] auto GetEnqueuedCount() const noexcept -> NGIN::UInt64
         {
-            return m_totalEnqueued.load(std::memory_order_relaxed);
+            return GetStats().enqueued;
         }
 
     private:
         class MpscBoundedQueue
         {
-        private:
-            struct Slot
-            {
-                std::atomic<std::size_t> sequence {0};
-                OwnedLogRecord           record {};
-            };
-
         public:
-            MpscBoundedQueue() noexcept
-            {
-                for (std::size_t i = 0; i < QueueCapacity; ++i)
-                {
-                    m_slots[i].sequence.store(i, std::memory_order_relaxed);
-                }
-            }
-
             [[nodiscard]] bool TryEnqueue(OwnedLogRecord&& record) noexcept
             {
-                Slot*       slot = nullptr;
-                std::size_t pos  = m_enqueuePosition.load(std::memory_order_relaxed);
-
-                for (;;)
+                std::lock_guard lock(m_mutex);
+                if (m_size >= QueueCapacity)
                 {
-                    slot = &m_slots[pos & (QueueCapacity - 1)];
-                    const auto sequence = slot->sequence.load(std::memory_order_acquire);
-                    const auto diff = static_cast<std::intptr_t>(sequence) - static_cast<std::intptr_t>(pos);
-
-                    if (diff == 0)
-                    {
-                        if (m_enqueuePosition.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
-                        {
-                            break;
-                        }
-                    }
-                    else if (diff < 0)
-                    {
-                        return false;
-                    }
-                    else
-                    {
-                        pos = m_enqueuePosition.load(std::memory_order_relaxed);
-                    }
+                    return false;
                 }
 
-                slot->record = std::move(record);
-                slot->sequence.store(pos + 1, std::memory_order_release);
+                m_slots[m_enqueueIndex] = std::move(record);
+                m_enqueueIndex = (m_enqueueIndex + 1) & (QueueCapacity - 1);
+                ++m_size;
                 return true;
             }
 
             [[nodiscard]] bool TryDequeue(OwnedLogRecord& outRecord) noexcept
             {
-                const auto pos = m_dequeuePosition.load(std::memory_order_relaxed);
-                auto&      slot = m_slots[pos & (QueueCapacity - 1)];
-                const auto sequence = slot.sequence.load(std::memory_order_acquire);
-                const auto diff = static_cast<std::intptr_t>(sequence) - static_cast<std::intptr_t>(pos + 1);
-
-                if (diff != 0)
+                std::lock_guard lock(m_mutex);
+                if (m_size == 0)
                 {
                     return false;
                 }
 
-                m_dequeuePosition.store(pos + 1, std::memory_order_relaxed);
-                outRecord = std::move(slot.record);
-                slot.sequence.store(pos + QueueCapacity, std::memory_order_release);
+                outRecord = std::move(m_slots[m_dequeueIndex]);
+                m_dequeueIndex = (m_dequeueIndex + 1) & (QueueCapacity - 1);
+                --m_size;
                 return true;
+            }
+
+            [[nodiscard]] auto ApproxDepth() const noexcept -> std::size_t
+            {
+                std::lock_guard lock(m_mutex);
+                return m_size;
+            }
+
+            [[nodiscard]] bool CanEnqueue() const noexcept
+            {
+                return ApproxDepth() < QueueCapacity;
             }
 
             [[nodiscard]] bool IsEmpty() const noexcept
             {
-                return m_dequeuePosition.load(std::memory_order_acquire) ==
-                       m_enqueuePosition.load(std::memory_order_acquire);
+                return ApproxDepth() == 0;
             }
 
         private:
-            std::array<Slot, QueueCapacity> m_slots {};
-            std::atomic<std::size_t>        m_enqueuePosition {0};
-            std::atomic<std::size_t>        m_dequeuePosition {0};
+            mutable std::mutex                  m_mutex {};
+            std::array<OwnedLogRecord, QueueCapacity> m_slots {};
+            std::size_t                         m_enqueueIndex {0};
+            std::size_t                         m_dequeueIndex {0};
+            std::size_t                         m_size {0};
         };
 
         [[nodiscard]] static auto ToOwned(const LogRecordView& record) noexcept -> OwnedLogRecord
@@ -215,7 +220,6 @@ namespace NGIN::Log
 
             const auto count = std::min<std::size_t>(record.attributes.size(), Config::MaxAttributes);
             out.attributeCount = count;
-
             if (record.attributes.size() > count)
             {
                 out.truncatedAttributeCount += static_cast<NGIN::UInt32>(record.attributes.size() - count);
@@ -225,7 +229,6 @@ namespace NGIN::Log
             {
                 const auto& inAttr = record.attributes[i];
                 auto&       outAttr = out.attributes[i];
-
                 outAttr.key.Assign(inAttr.key, out.truncatedBytes);
 
                 std::visit(
@@ -281,7 +284,123 @@ namespace NGIN::Log
             return static_cast<NGIN::UInt64>(duration_cast<nanoseconds>(now).count());
         }
 
-        void EmitDropReportIfNeeded() noexcept
+        void RecordError(std::string_view reason) noexcept
+        {
+            m_errorCount.fetch_add(1, std::memory_order_relaxed);
+            if (m_options.notifyOnError)
+            {
+                try
+                {
+                    m_options.notifyOnError(reason);
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        void RecordDrop() noexcept
+        {
+            m_totalDropped.fetch_add(1, std::memory_order_relaxed);
+            m_unreportedDropped.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void RecordTimeoutDrop() noexcept
+        {
+            RecordDrop();
+            m_timeoutDropped.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        [[nodiscard]] bool TryEnqueueOwned(OwnedLogRecord&& owned) noexcept
+        {
+            m_outstanding.fetch_add(1, std::memory_order_acq_rel);
+            if (!m_queue.TryEnqueue(std::move(owned)))
+            {
+                m_outstanding.fetch_sub(1, std::memory_order_acq_rel);
+                NotifyFlushWaiters();
+                return false;
+            }
+
+            m_totalEnqueued.fetch_add(1, std::memory_order_relaxed);
+            UpdateHighWatermark(static_cast<NGIN::UInt64>(m_queue.ApproxDepth()));
+            m_wakeCondition.notify_one();
+            return true;
+        }
+
+        void EnqueueDropNewest(OwnedLogRecord&& owned) noexcept
+        {
+            if (!TryEnqueueOwned(std::move(owned)))
+            {
+                RecordDrop();
+            }
+        }
+
+        void EnqueueBlocking(OwnedLogRecord&& owned) noexcept
+        {
+            while (m_running.load(std::memory_order_acquire))
+            {
+                if (TryEnqueueOwned(std::move(owned)))
+                {
+                    return;
+                }
+
+                std::unique_lock lock(m_spaceMutex);
+                m_spaceCondition.wait(lock, [this] {
+                    return !m_running.load(std::memory_order_acquire) || m_queue.CanEnqueue();
+                });
+            }
+
+            RecordDrop();
+        }
+
+        void EnqueueBlockingWithTimeout(OwnedLogRecord&& owned) noexcept
+        {
+            auto deadline = std::chrono::steady_clock::now() + m_options.blockTimeout;
+
+            while (m_running.load(std::memory_order_acquire))
+            {
+                if (TryEnqueueOwned(std::move(owned)))
+                {
+                    return;
+                }
+
+                std::unique_lock lock(m_spaceMutex);
+                if (!m_spaceCondition.wait_until(lock, deadline, [this] {
+                        return !m_running.load(std::memory_order_acquire) || m_queue.CanEnqueue();
+                    }))
+                {
+                    RecordTimeoutDrop();
+                    return;
+                }
+            }
+
+            RecordTimeoutDrop();
+        }
+
+        void EnqueueWithSyncFallback(OwnedLogRecord&& owned) noexcept
+        {
+            if (TryEnqueueOwned(std::move(owned)))
+            {
+                return;
+            }
+
+            m_outstanding.fetch_add(1, std::memory_order_acq_rel);
+            m_fallbackWrites.fetch_add(1, std::memory_order_relaxed);
+            Deliver(owned);
+            m_outstanding.fetch_sub(1, std::memory_order_acq_rel);
+            NotifyFlushWaiters();
+        }
+
+        void UpdateHighWatermark(const NGIN::UInt64 depth) noexcept
+        {
+            auto current = m_queueHighWatermark.load(std::memory_order_relaxed);
+            while (depth > current &&
+                   !m_queueHighWatermark.compare_exchange_weak(current, depth, std::memory_order_relaxed))
+            {
+            }
+        }
+
+        void EmitDropReportIfNeededLocked() noexcept
         {
             const auto dropped = m_unreportedDropped.exchange(0, std::memory_order_acq_rel);
             if (dropped == 0 || !m_sink)
@@ -295,7 +414,7 @@ namespace NGIN::Log
             report.loggerName = "AsyncSink";
 
             const auto prefix = std::string_view("Dropped ");
-            const auto suffix = std::string_view(" log records due to full async queue.");
+            const auto suffix = std::string_view(" log records due to async overflow.");
 
             std::size_t writeOffset = 0;
             auto        append = [&](const std::string_view part) noexcept {
@@ -312,18 +431,11 @@ namespace NGIN::Log
 
             std::array<char, 32> droppedChars {};
             const auto [ptr, ec] = std::to_chars(droppedChars.data(), droppedChars.data() + droppedChars.size(), dropped);
-            if (ec == std::errc {})
-            {
-                append(std::string_view(droppedChars.data(), static_cast<std::size_t>(ptr - droppedChars.data())));
-            }
-            else
-            {
-                append("?");
-            }
-
+            append(ec == std::errc {} ? std::string_view(droppedChars.data(), static_cast<std::size_t>(ptr - droppedChars.data()))
+                                      : std::string_view("?"));
             append(suffix);
-            m_dropReportBuffer[writeOffset] = '\0';
 
+            m_dropReportBuffer[writeOffset] = '\0';
             report.message = std::string_view(m_dropReportBuffer.data(), writeOffset);
             report.source = std::source_location::current();
             report.threadIdHash = CurrentThreadHash();
@@ -335,7 +447,25 @@ namespace NGIN::Log
             }
             catch (...)
             {
-                m_errorCount.fetch_add(1, std::memory_order_relaxed);
+                RecordError("async-drop-report-write-failed");
+            }
+        }
+
+        void FlushWrappedSink() noexcept
+        {
+            if (!m_sink)
+            {
+                return;
+            }
+
+            std::lock_guard lock(m_deliveryMutex);
+            try
+            {
+                m_sink->Flush();
+            }
+            catch (...)
+            {
+                RecordError("async-flush-failed");
             }
         }
 
@@ -353,10 +483,16 @@ namespace NGIN::Log
                     }
 
                     Deliver(owned);
-                    m_pending.fetch_sub(1, std::memory_order_release);
+                    m_outstanding.fetch_sub(1, std::memory_order_acq_rel);
+                    m_spaceCondition.notify_all();
                 }
 
-                EmitDropReportIfNeeded();
+                if (m_options.emitDropReports)
+                {
+                    std::lock_guard deliveryLock(m_deliveryMutex);
+                    EmitDropReportIfNeededLocked();
+                }
+
                 NotifyFlushWaiters();
 
                 if (drained == 0)
@@ -368,18 +504,13 @@ namespace NGIN::Log
                 }
             }
 
-            EmitDropReportIfNeeded();
-            if (m_sink)
+            if (m_options.emitDropReports)
             {
-                try
-                {
-                    m_sink->Flush();
-                }
-                catch (...)
-                {
-                    m_errorCount.fetch_add(1, std::memory_order_relaxed);
-                }
+                std::lock_guard deliveryLock(m_deliveryMutex);
+                EmitDropReportIfNeededLocked();
             }
+
+            FlushWrappedSink();
             NotifyFlushWaiters();
         }
 
@@ -409,19 +540,21 @@ namespace NGIN::Log
                 .truncatedBytes = owned.truncatedBytes,
             };
 
+            std::lock_guard lock(m_deliveryMutex);
             try
             {
                 m_sink->Write(record);
+                m_totalDelivered.fetch_add(1, std::memory_order_relaxed);
             }
             catch (...)
             {
-                m_errorCount.fetch_add(1, std::memory_order_relaxed);
+                RecordError("async-deliver-failed");
             }
         }
 
         void NotifyFlushWaiters() noexcept
         {
-            if (m_pending.load(std::memory_order_acquire) == 0 && m_queue.IsEmpty())
+            if (m_outstanding.load(std::memory_order_acquire) == 0 && m_queue.IsEmpty())
             {
                 std::lock_guard lock(m_flushMutex);
                 m_flushCondition.notify_all();
@@ -437,15 +570,15 @@ namespace NGIN::Log
             }
 
             m_wakeCondition.notify_all();
+            m_spaceCondition.notify_all();
             if (m_worker.joinable())
             {
                 m_worker.join();
             }
-
-            Flush();
         }
 
         NGIN::Memory::Scoped<TSink> m_sink;
+        AsyncSinkOptions            m_options {};
         MpscBoundedQueue            m_queue {};
 
         std::atomic<bool>           m_running {true};
@@ -454,12 +587,21 @@ namespace NGIN::Log
         std::mutex                  m_wakeMutex {};
         std::condition_variable     m_wakeCondition {};
 
-        std::atomic<NGIN::UInt64>   m_totalDropped {0};
-        std::atomic<NGIN::UInt64>   m_unreportedDropped {0};
-        std::atomic<NGIN::UInt64>   m_totalEnqueued {0};
-        std::atomic<NGIN::UInt64>   m_errorCount {0};
+        std::mutex                  m_spaceMutex {};
+        std::condition_variable     m_spaceCondition {};
 
-        std::atomic<std::size_t>    m_pending {0};
+        std::mutex                  m_deliveryMutex {};
+
+        std::atomic<NGIN::UInt64>   m_totalEnqueued {0};
+        std::atomic<NGIN::UInt64>   m_totalDelivered {0};
+        std::atomic<NGIN::UInt64>   m_totalDropped {0};
+        std::atomic<NGIN::UInt64>   m_timeoutDropped {0};
+        std::atomic<NGIN::UInt64>   m_fallbackWrites {0};
+        std::atomic<NGIN::UInt64>   m_errorCount {0};
+        std::atomic<NGIN::UInt64>   m_unreportedDropped {0};
+        std::atomic<NGIN::UInt64>   m_queueHighWatermark {0};
+
+        std::atomic<std::size_t>    m_outstanding {0};
         std::mutex                  m_flushMutex {};
         std::condition_variable     m_flushCondition {};
 

@@ -86,8 +86,10 @@ endif()
 
 set(NGIN_LOG_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/NGIN/Log/LoggerRegistry.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/NGIN/Log/RecordFormatter.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/NGIN/Log/Sinks/ConsoleSink.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/NGIN/Log/Sinks/FileSink.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/NGIN/Log/Sinks/RotatingFileSink.cpp
 )
 
 set(NGIN_LOG_EXPORT_TARGETS)

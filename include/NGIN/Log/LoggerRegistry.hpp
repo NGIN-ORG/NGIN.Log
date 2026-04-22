@@ -3,51 +3,247 @@
 #include <NGIN/Log/Export.hpp>
 #include <NGIN/Log/Logger.hpp>
 
+#include <algorithm>
+#include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace NGIN::Log
 {
-    /// @brief Registry for named logger instances and default sink/runtime-level configuration.
-    class NGIN_LOG_API LoggerRegistry
+    struct LoggerConfig
+    {
+        LogLevel              runtimeMin {LogLevel::Info};
+        std::vector<SinkPtr>  sinks {};
+    };
+
+    struct LoggerRule
+    {
+        std::string                     prefix {};
+        std::optional<LogLevel>         runtimeMin {};
+        std::optional<std::vector<SinkPtr>> sinks {};
+    };
+
+    namespace detail
+    {
+        [[nodiscard]] inline auto LoggerNameMatchesPrefix(const std::string_view name, const std::string_view prefix) noexcept -> bool
+        {
+            if (prefix.empty())
+            {
+                return true;
+            }
+
+            if (name == prefix)
+            {
+                return true;
+            }
+
+            return name.size() > prefix.size() && name.starts_with(prefix) && name[prefix.size()] == '.';
+        }
+    }
+
+    template<LogLevel CompileTimeMin = LogLevel::Trace, class FormatterPolicy = StdFormatter>
+    class BasicLoggerRegistry
     {
     public:
-        using LoggerType = Logger<LogLevel::Trace>;
+        using LoggerType = Logger<CompileTimeMin, FormatterPolicy>;
         using LoggerPtr  = NGIN::Memory::Shared<LoggerType>;
         using SinkSet    = typename LoggerType::SinkSet;
 
-        /// @brief Construct an empty registry.
-        LoggerRegistry();
+        [[nodiscard]] auto GetOrCreate(std::string name, const LogLevel runtimeMin = LogLevel::Info) -> LoggerPtr
+        {
+            {
+                std::shared_lock lock(m_mutex);
+                if (const auto it = m_loggers.find(name); it != m_loggers.end())
+                {
+                    return it->second;
+                }
+            }
 
-        /// @brief Get or create a named logger.
-        /// @param name Logger name.
-        /// @param runtimeMin Runtime level used only when creating a new logger.
-        [[nodiscard]] auto GetOrCreate(std::string name, LogLevel runtimeMin = LogLevel::Info) -> LoggerPtr;
+            std::unique_lock lock(m_mutex);
+            if (const auto it = m_loggers.find(name); it != m_loggers.end())
+            {
+                return it->second;
+            }
 
-        /// @brief Get an existing logger by name.
-        [[nodiscard]] auto Get(std::string_view name) const noexcept -> LoggerPtr;
+            LoggerConfig config = ComputeEffectiveConfigLocked(name);
+            if (config.runtimeMin == m_defaultRuntimeMin && runtimeMin != LogLevel::Info)
+            {
+                config.runtimeMin = runtimeMin;
+            }
 
-        /// @brief Set default sinks used by subsequently created loggers.
-        void SetDefaultSinks(SinkSet sinks) noexcept;
+            auto logger = NGIN::Memory::MakeShared<LoggerType>(name, config.runtimeMin, config.sinks);
+            m_loggers.emplace(std::move(name), logger);
+            return logger;
+        }
 
-        /// @brief Get a copy of the default sink set snapshot.
-        [[nodiscard]] auto GetDefaultSinks() const -> SinkSet;
+        [[nodiscard]] auto Get(const std::string_view name) const noexcept -> LoggerPtr
+        {
+            std::shared_lock lock(m_mutex);
+            const auto       it = m_loggers.find(std::string(name));
+            if (it == m_loggers.end())
+            {
+                return {};
+            }
 
-        /// @brief Update runtime minimum level for an existing logger.
-        void SetLoggerRuntimeMin(std::string_view name, LogLevel runtimeMin) noexcept;
+            return it->second;
+        }
 
-        /// @brief Replace sink snapshot for an existing logger.
-        void ReplaceLoggerSinks(std::string_view name, SinkSet sinks) noexcept;
+        void SetDefaultRuntimeMin(const LogLevel runtimeMin) noexcept
+        {
+            std::unique_lock lock(m_mutex);
+            m_defaultRuntimeMin = runtimeMin;
+            ApplyConfigUpdatesLocked();
+        }
 
-        /// @brief Enumerate known logger names.
-        [[nodiscard]] auto GetLoggerNames() const -> std::vector<std::string>;
+        void SetDefaultSinks(SinkSet sinks) noexcept
+        {
+            std::unique_lock lock(m_mutex);
+            m_defaultSinks = std::move(sinks);
+            ApplyConfigUpdatesLocked();
+        }
+
+        [[nodiscard]] auto GetDefaultSinks() const -> SinkSet
+        {
+            std::shared_lock lock(m_mutex);
+            return m_defaultSinks;
+        }
+
+        [[nodiscard]] auto GetDefaultRuntimeMin() const noexcept -> LogLevel
+        {
+            std::shared_lock lock(m_mutex);
+            return m_defaultRuntimeMin;
+        }
+
+        void SetLoggerRuntimeMin(const std::string_view name, const LogLevel runtimeMin) noexcept
+        {
+            if (const auto logger = Get(name))
+            {
+                logger->SetRuntimeMin(runtimeMin);
+            }
+        }
+
+        void ReplaceLoggerSinks(const std::string_view name, SinkSet sinks) noexcept
+        {
+            if (const auto logger = Get(name))
+            {
+                logger->SetSinks(std::move(sinks));
+            }
+        }
+
+        void UpsertRule(LoggerRule rule) noexcept
+        {
+            std::unique_lock lock(m_mutex);
+            for (auto& existingRule : m_rules)
+            {
+                if (existingRule.prefix == rule.prefix)
+                {
+                    existingRule = std::move(rule);
+                    ApplyConfigUpdatesLocked();
+                    return;
+                }
+            }
+
+            m_rules.push_back(std::move(rule));
+            ApplyConfigUpdatesLocked();
+        }
+
+        void RemoveRule(const std::string_view prefix) noexcept
+        {
+            std::unique_lock lock(m_mutex);
+            m_rules.erase(
+                std::remove_if(
+                    m_rules.begin(),
+                    m_rules.end(),
+                    [&](const LoggerRule& rule) {
+                        return rule.prefix == prefix;
+                    }),
+                m_rules.end());
+            ApplyConfigUpdatesLocked();
+        }
+
+        [[nodiscard]] auto GetEffectiveConfig(const std::string_view name) const -> LoggerConfig
+        {
+            std::shared_lock lock(m_mutex);
+            return ComputeEffectiveConfigLocked(name);
+        }
+
+        [[nodiscard]] auto GetLoggerNames() const -> std::vector<std::string>
+        {
+            std::vector<std::string> names;
+            std::shared_lock         lock(m_mutex);
+            names.reserve(m_loggers.size());
+            for (const auto& [name, _] : m_loggers)
+            {
+                names.push_back(name);
+            }
+
+            std::sort(names.begin(), names.end());
+            return names;
+        }
 
     private:
-        mutable std::shared_mutex                         m_mutex;
-        std::unordered_map<std::string, LoggerPtr> m_loggers;
-        SinkSet                                      m_defaultSinks;
+        [[nodiscard]] auto ComputeEffectiveConfigLocked(const std::string_view name) const -> LoggerConfig
+        {
+            LoggerConfig config {
+                .runtimeMin = m_defaultRuntimeMin,
+                .sinks = m_defaultSinks,
+            };
+
+            const LoggerRule* bestRule = nullptr;
+            for (const auto& rule : m_rules)
+            {
+                if (!detail::LoggerNameMatchesPrefix(name, rule.prefix))
+                {
+                    continue;
+                }
+
+                if (bestRule == nullptr || rule.prefix.size() > bestRule->prefix.size())
+                {
+                    bestRule = &rule;
+                }
+            }
+
+            if (bestRule != nullptr)
+            {
+                if (bestRule->runtimeMin.has_value())
+                {
+                    config.runtimeMin = *bestRule->runtimeMin;
+                }
+                if (bestRule->sinks.has_value())
+                {
+                    config.sinks = *bestRule->sinks;
+                }
+            }
+
+            return config;
+        }
+
+        void ApplyConfigUpdatesLocked() noexcept
+        {
+            for (const auto& [name, logger] : m_loggers)
+            {
+                if (!logger)
+                {
+                    continue;
+                }
+
+                const auto config = ComputeEffectiveConfigLocked(name);
+                logger->SetRuntimeMin(config.runtimeMin);
+                logger->SetSinks(config.sinks);
+            }
+        }
+
+        mutable std::shared_mutex              m_mutex {};
+        std::unordered_map<std::string, LoggerPtr> m_loggers {};
+        SinkSet                               m_defaultSinks {};
+        LogLevel                              m_defaultRuntimeMin {LogLevel::Info};
+        std::vector<LoggerRule>               m_rules {};
     };
+
+    using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace, StdFormatter>;
 }

@@ -2,46 +2,25 @@
 
 NGIN.Log is a standalone C++23 logging library in the NGIN family.
 
-It focuses on explicit, structured, performance-conscious logging without relying on macro-heavy APIs.
-
-The short version is:
-
-- macro-free logging API
-- explicit source metadata
-- compile-time and runtime filtering
-- structured attributes
-- sync and async sink composition
-
-It is designed to be useful as a normal C++ logging library, not only inside the full NGIN platform.
-
-## What NGIN.Log Is For
-
-NGIN.Log is for applications that want:
-
-- clear logging call sites
-- predictable filtering behavior
-- structured records
-- multiple sinks
-- async logging without turning the producer path into a black box
-
-It aims to keep the logging model explicit: what gets logged, where it goes, and when it is filtered should be understandable from the code.
+It is built around a bounded record builder, compile-time plus runtime filtering, structured attributes, formatter-driven output, and bounded async delivery. The library stays usable without macros, while optionally providing source-capturing macro helpers for formatted calls.
 
 ## What It Provides
 
-NGIN.Log provides:
-
-- macro-free logger APIs
-- compile-time minimum log levels
-- runtime per-logger level control
-- structured key-value attributes
-- sink fan-out
-- async sink wrapping with bounded queues
-- built-in sinks such as console and file sinks
+- macro-free logger APIs with optional `NGIN/Log/Macros.hpp`
+- compile-time minimum log levels plus runtime per-logger filtering
+- direct message logging, builder-style logging, and formatted logging
+- richer attribute normalization including durations, error codes, enums, pointers, and owned strings
+- thread-local scoped logging context
+- formatter/transport split with text, JSON, and logfmt output
+- sync sinks (`ConsoleSink`, `FileSink`, `RotatingFileSink`)
+- async sink wrapping with bounded queues, overflow policies, and live stats
+- hierarchical logger registry rules for live runtime configuration
 
 ## Quick Example
 
 ```cpp
 #include <NGIN/Log/Log.hpp>
+#include <NGIN/Log/Macros.hpp>
 
 int main()
 {
@@ -50,31 +29,51 @@ int main()
     AppLogger::SinkSet sinks {};
     sinks.push_back(NGIN::Log::MakeSink<NGIN::Log::ConsoleSink>());
 
+    auto fileSink = NGIN::Memory::MakeScoped<NGIN::Log::RotatingFileSink>(
+        NGIN::Log::RotatingFileSinkOptions {
+            .path = "app.log",
+            .formatter = NGIN::Log::MakeRecordFormatter<NGIN::Log::JsonRecordFormatter>(),
+        });
+
+    sinks.push_back(NGIN::Log::MakeSink<NGIN::Log::AsyncSink<NGIN::Log::RotatingFileSink>>(
+        std::move(fileSink),
+        NGIN::Log::AsyncSinkOptions {.overflowPolicy = NGIN::Log::AsyncOverflowPolicy::Block}));
+
     AppLogger logger("App", NGIN::Log::LogLevel::Info, std::move(sinks));
 
-    logger.Info([](NGIN::Log::RecordBuilder& rec) {
-        rec.Message("started");
-        rec.Attr("pid", static_cast<NGIN::UInt64>(1234));
-    });
+    auto scope = NGIN::Log::PushLogContext({{"request_id", "req-1"}});
+    logger.Info("started");
+    NGIN_LOG_INFOF(logger, "value={} ok={}", 42, true);
+    logger.Flush();
+    (void)scope;
 }
 ```
 
-## The Main API Styles
+## Main API Shapes
 
 ### Builder API
 
-Best when you want tight control over work done on the logging path.
+Best for hot paths and precise work control.
 
 ```cpp
 logger.Debug([&](NGIN::Log::RecordBuilder& rec) {
     rec.Message("cache miss");
     rec.Attr("key", std::string_view("user:42"));
+    rec.Attr("latency", std::chrono::microseconds(17));
 });
+```
+
+### Direct Message API
+
+Best for the common simple case.
+
+```cpp
+logger.Warn("slow request");
 ```
 
 ### Format API
 
-Useful when convenience matters more than minimizing every instruction on the hot path.
+Best when convenience matters more than avoiding every formatting cost.
 
 ```cpp
 logger.Infof(std::source_location::current(), "value={} ok={}", value, ok);
@@ -85,20 +84,6 @@ logger.Infof(std::source_location::current(), "value={} ok={}", value, ok);
 - `NGIN::Log::Static`
 - `NGIN::Log::Shared`
 - `NGIN::Log` alias resolves to shared when present, else static
-
-## Build Options
-
-Main CMake options:
-
-- `NGIN_LOG_BUILD_STATIC` default `ON`
-- `NGIN_LOG_BUILD_SHARED` default `OFF`
-- `NGIN_LOG_BUILD_TESTS` default `ON`
-- `NGIN_LOG_BUILD_EXAMPLES` default `ON`
-- `NGIN_LOG_BUILD_BENCHMARKS` default `ON`
-- `NGIN_LOG_ENABLE_ASAN` default `OFF`
-- `NGIN_LOG_ENABLE_TSAN` default `OFF`
-- `NGIN_LOG_ENABLE_LTO` default `OFF`
-- `NGIN_LOG_STRICT_WARNINGS` default `ON`
 
 ## Typical Local Build
 
@@ -112,15 +97,9 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-## Where It Fits
-
-Within the NGIN ecosystem, NGIN.Log is the logging layer other libraries can build on.
-
-It is still a normal standalone library, but in the platform stack it commonly sits above `NGIN.Base` and below higher-level runtime or tooling layers.
-
 ## Read Next
 
 - [Documentation Index](docs/README.md)
-- [API Reference Guide](docs/API.md)
+- [API Guide](docs/API.md)
 - [Architecture Notes](docs/Architecture.md)
 - [Sinks Guide](docs/Sinks.md)
