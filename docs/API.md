@@ -5,7 +5,6 @@ This guide describes the current public API surface in `include/NGIN/Log`.
 ## Header Entry Points
 
 - `#include <NGIN/Log/Log.hpp>` for the main API
-- `#include <NGIN/Log/Macros.hpp>` for optional source-capturing format macros
 
 ## Core Types
 
@@ -49,8 +48,6 @@ Attribute values on the transport path remain:
 
 Stack-only bounded builder:
 - `Message(std::string_view)`
-- `Format(std::format_string<Args...>, Args&&...)`
-- `VFormat(std::string_view, std::format_args)`
 - `Attr(std::string_view key, TValue&& value)`
 
 Normalized attribute inputs now include:
@@ -102,7 +99,7 @@ Timestamp rendering styles:
 - `Iso8601Utc`
 - `Iso8601Local`
 
-## `Logger<CompileTimeMin, FormatterPolicy>`
+## `Logger<CompileTimeMin>`
 
 Main logging type.
 
@@ -118,19 +115,20 @@ Logging styles:
 - `Log<Level>(fn, source = current())`
 - direct message overloads: `Trace/Debug/Info/Warn/Error/Fatal(std::string_view, source = current())`
 - builder overloads: `Trace/Debug/Info/Warn/Error/Fatal(fn, source = current())`
-- format helpers: `Tracef/Debugf/...`
-- runtime format helpers: `Tracefv/Debugfv/...`
 
-Important source rule:
-- class-based `*f` and `*fv` APIs require explicit `std::source_location`
-- optional macros in `NGIN/Log/Macros.hpp` forward the call-site source automatically
+Behavior rule:
+- builder callbacks execute only if the record passes compile-time and runtime filtering
+
+Source rule:
+- direct-message and builder APIs capture `std::source_location::current()` by default
+- source is built-in record metadata, not a user-managed attribute
 
 ## Registry API
 
-### `BasicLoggerRegistry<CompileTimeMin, FormatterPolicy>`
+### `BasicLoggerRegistry<CompileTimeMin>`
 
 Main registry type. Backward-compatible alias:
-- `using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace, StdFormatter>;`
+- `using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace>;`
 
 Supporting types:
 - `LoggerConfig`
@@ -190,5 +188,5 @@ Stats:
 - Public logging APIs are `noexcept`
 - sink exceptions are swallowed and counted
 - re-entrant dispatch is guarded by a thread-local recursion check
-- dynamic format (`*fv`) may allocate due to `std::vformat`
 - context propagation is thread-local only
+- direct-message calls perform any consumer-owned message construction before entering the logger

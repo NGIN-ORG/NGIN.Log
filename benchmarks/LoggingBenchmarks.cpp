@@ -1,8 +1,8 @@
 #include <NGIN/Log/Log.hpp>
 
 #include <chrono>
+#include <format>
 #include <iostream>
-#include <source_location>
 
 namespace
 {
@@ -59,14 +59,21 @@ int main()
     });
 
     Benchmark("enabled-info-direct-message-null-sink", iterations, [&](int i) {
+        const auto message = std::format("value={} status={}", i, "ok");
+        enabled.Info(message);
+    });
+
+    Benchmark("enabled-builder-deferred-message-null-sink", iterations, [&](int i) {
+        enabled.Info([&](NGIN::Log::RecordBuilder& rec) {
+            rec.Message(std::format("value={} status={}", i, "ok"));
+        });
+    });
+
+    Benchmark("enabled-structured-builder-null-sink", iterations, [&](int i) {
         enabled.Info([&](NGIN::Log::RecordBuilder& rec) {
             rec.Message("hot-path");
             rec.Attr("i", static_cast<NGIN::Int64>(i));
         });
-    });
-
-    Benchmark("enabled-formatted-null-sink", iterations, [&](int i) {
-        enabled.Infof(std::source_location::current(), "value={} status={}", i, "ok");
     });
 
     Benchmark("enabled-contextual-null-sink", iterations, [&](int i) {
@@ -76,7 +83,10 @@ int main()
     });
 
     Benchmark("enabled-async-rotating-json", 100000, [&](int i) {
-        asyncLogger.Infof(std::source_location::current(), "async value={}", i);
+        asyncLogger.Info([&](NGIN::Log::RecordBuilder& rec) {
+            rec.Message(std::format("async value={}", i));
+            rec.Attr("iteration", i);
+        });
     });
 
     asyncLogger.Flush();

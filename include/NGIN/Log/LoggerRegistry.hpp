@@ -46,11 +46,11 @@ namespace NGIN::Log
         }
     }
 
-    template<LogLevel CompileTimeMin = LogLevel::Trace, class FormatterPolicy = StdFormatter>
+    template<LogLevel CompileTimeMin = LogLevel::Trace>
     class BasicLoggerRegistry
     {
     public:
-        using LoggerType = Logger<CompileTimeMin, FormatterPolicy>;
+        using LoggerType = Logger<CompileTimeMin>;
         using LoggerPtr  = NGIN::Memory::Shared<LoggerType>;
         using SinkSet    = typename LoggerType::SinkSet;
 
@@ -245,5 +245,5 @@ namespace NGIN::Log
         std::vector<LoggerRule>               m_rules {};
     };
 
-    using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace, StdFormatter>;
+    using LoggerRegistry = BasicLoggerRegistry<LogLevel::Trace>;
 }

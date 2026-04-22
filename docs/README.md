@@ -6,7 +6,7 @@ This folder contains implementation-aligned documentation for `NGIN.Log`.
 
 - [API Guide](./API.md)
   - Public types and logger APIs
-  - direct-message, builder, and formatted call styles
+  - direct-message and builder call styles
   - context, registry, formatter, and async options
 
 - [Architecture](./Architecture.md)

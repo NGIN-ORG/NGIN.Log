@@ -1,5 +1,4 @@
 #include <NGIN/Log/Log.hpp>
-#include <NGIN/Log/Macros.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -201,12 +200,7 @@ namespace
     };
 
     template<class TLogger>
-    concept HasDebugfNoSource = requires(TLogger& logger) {
-        logger.Debugf("value={}", 1);
-    };
-
-    template<class TLogger>
-    concept HasDebugfWithSource = requires(TLogger& logger) {
+    concept HasDebugf = requires(TLogger& logger) {
         logger.Debugf(std::source_location::current(), "value={}", 1);
     };
 
@@ -240,8 +234,7 @@ namespace
 }
 
 using SignatureLogger = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
-static_assert(!HasDebugfNoSource<SignatureLogger>, "No-source Debugf overload must not be callable");
-static_assert(HasDebugfWithSource<SignatureLogger>, "Explicit-source Debugf overload must be callable");
+static_assert(!HasDebugf<SignatureLogger>, "Formatting overloads must not be callable");
 
 TEST_CASE("Compile-time filtering does not execute disabled builder", "[log][filter]")
 {
@@ -304,7 +297,7 @@ TEST_CASE("Lazy API captures call-site source location", "[log][source]")
     REQUIRE(std::string_view(state.lastRecord.source.file_name()).find("AllTests.cpp") != std::string_view::npos);
 }
 
-TEST_CASE("Formatting API uses explicit source location", "[log][source][format]")
+TEST_CASE("Direct message API captures call-site source location", "[log][source]")
 {
     using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
 
@@ -312,34 +305,18 @@ TEST_CASE("Formatting API uses explicit source location", "[log][source][format]
     LoggerType::SinkSet sinks {};
     sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
 
-    LoggerType logger("Format", NGIN::Log::LogLevel::Trace, std::move(sinks));
+    LoggerType logger("DirectSource", NGIN::Log::LogLevel::Trace, std::move(sinks));
 
     const auto source = std::source_location::current();
-    logger.Infof(source, "value={}", 17);
+    logger.Info("value=17", source);
 
     std::lock_guard lock(state.mutex);
-    REQUIRE(state.lastMessage.find("value=17") != std::string::npos);
+    REQUIRE(state.lastMessage == "value=17");
     REQUIRE(state.lastRecord.source.line() == source.line());
     REQUIRE(std::string_view(state.lastRecord.source.file_name()) == std::string_view(source.file_name()));
 }
 
-TEST_CASE("Runtime formatting API handles invalid format strings", "[log][format][runtime]")
-{
-    using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
-
-    CaptureState        state {};
-    LoggerType::SinkSet sinks {};
-    sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
-
-    LoggerType logger("FormatRuntimeError", NGIN::Log::LogLevel::Trace, std::move(sinks));
-    int        value = 17;
-    logger.Infofv(std::source_location::current(), "{", std::make_format_args(value));
-
-    std::lock_guard lock(state.mutex);
-    REQUIRE(state.lastMessage == "[format-error]");
-}
-
-TEST_CASE("Direct message overload and macros preserve ease of use", "[log][api]")
+TEST_CASE("Direct message and builder APIs preserve ease of use", "[log][api]")
 {
     using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
 
@@ -348,18 +325,20 @@ TEST_CASE("Direct message overload and macros preserve ease of use", "[log][api]
     sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
 
     LoggerType logger("Direct", NGIN::Log::LogLevel::Trace, std::move(sinks));
-    const auto macroLine = std::source_location::current().line() + 1;
-    NGIN_LOG_INFOF(logger, "macro value={}", 9);
-
+    logger.Warn("plain message");
     {
         std::lock_guard lock(state.mutex);
-        REQUIRE(state.lastMessage.find("macro value=9") != std::string::npos);
-        REQUIRE(state.lastRecord.source.line() == macroLine);
+        REQUIRE(state.lastMessage == "plain message");
     }
 
-    logger.Warn("plain message");
+    logger.Info([](NGIN::Log::RecordBuilder& rec) {
+        rec.Message("builder message");
+        rec.Attr("value", 9);
+    });
+
     std::lock_guard lock(state.mutex);
-    REQUIRE(state.lastMessage == "plain message");
+    REQUIRE(state.lastMessage == "builder message");
+    REQUIRE(std::get<NGIN::Int64>(FindCapturedAttribute(state, "value")->value) == 9);
 }
 
 TEST_CASE("RecordBuilder supports richer attribute normalization", "[log][builder][attr]")

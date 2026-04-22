@@ -10,7 +10,6 @@
 #include <charconv>
 #include <concepts>
 #include <cstring>
-#include <format>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,44 +40,6 @@ namespace NGIN::Log
             if (message.size() > copyLength)
             {
                 m_truncatedBytes += static_cast<NGIN::UInt32>(message.size() - copyLength);
-            }
-        }
-
-        template<class... Args>
-        void Format(std::format_string<Args...> fmt, Args&&... args) noexcept
-        {
-            try
-            {
-                const auto result = std::format_to_n(
-                    m_messageBuffer.data(),
-                    Config::MaxMessageBytes,
-                    fmt,
-                    std::forward<Args>(args)...);
-
-                const auto formattedSize = static_cast<std::size_t>(result.size);
-                m_messageSize = std::min(formattedSize, Config::MaxMessageBytes);
-                m_messageBuffer[m_messageSize] = '\0';
-
-                if (formattedSize > Config::MaxMessageBytes)
-                {
-                    m_truncatedBytes += static_cast<NGIN::UInt32>(formattedSize - Config::MaxMessageBytes);
-                }
-            }
-            catch (...)
-            {
-                Message("[format-error]");
-            }
-        }
-
-        void VFormat(const std::string_view fmt, std::format_args args) noexcept
-        {
-            try
-            {
-                Message(std::vformat(fmt, args));
-            }
-            catch (...)
-            {
-                Message("[format-error]");
             }
         }
 

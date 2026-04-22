@@ -1,5 +1,7 @@
 #include <NGIN/Log/Log.hpp>
-#include <NGIN/Log/Macros.hpp>
+
+#include <chrono>
+#include <format>
 
 int main()
 {
@@ -34,14 +36,13 @@ int main()
     });
 
     logger.Info("NGIN.Log example started");
+    logger.Info(std::format("preformatted value={} tag={}", 42, "sample"));
 
     logger.Debug([](NGIN::Log::RecordBuilder& rec) {
-        rec.Message("structured builder log");
+        rec.Message(std::format("deferred message value={}", 7));
         rec.Attr("status", 200);
         rec.Attr("latency_ns", std::chrono::microseconds(275));
     });
-
-    NGIN_LOG_INFOF(logger, "formatted value={} tag={}", 42, "sample");
 
     logger.Flush();
     (void)requestScope;

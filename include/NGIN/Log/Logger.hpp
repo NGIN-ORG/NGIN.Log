@@ -2,7 +2,6 @@
 
 #include <NGIN/Defines.hpp>
 #include <NGIN/Log/Context.hpp>
-#include <NGIN/Log/FormatterPolicy.hpp>
 #include <NGIN/Log/LogLevel.hpp>
 #include <NGIN/Log/RecordBuilder.hpp>
 #include <NGIN/Log/Sink.hpp>
@@ -11,7 +10,6 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <format>
 #include <functional>
 #include <memory>
 #include <source_location>
@@ -24,11 +22,10 @@
 
 namespace NGIN::Log
 {
-    template<LogLevel CompileTimeMin, class TFormatterPolicy = StdFormatter>
+    template<LogLevel CompileTimeMin>
     class Logger
     {
     public:
-        using FormatterPolicy = TFormatterPolicy;
         using SinkSet         = std::vector<SinkPtr>;
 
         explicit Logger(
@@ -135,32 +132,6 @@ namespace NGIN::Log
             }
         }
 
-        template<LogLevel L, class... Args>
-        NGIN_FORCEINLINE void Logf(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Log<L>(
-                [&](RecordBuilder& builder) {
-                    FormatterPolicy::Format(builder, fmt, std::forward<Args>(args)...);
-                },
-                source);
-        }
-
-        template<LogLevel L>
-        NGIN_FORCEINLINE void Logfv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Log<L>(
-                [&](RecordBuilder& builder) {
-                    FormatterPolicy::FormatV(builder, fmt, args);
-                },
-                source);
-        }
-
         NGIN_FORCEINLINE void Trace(const std::string_view message, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Trace>([message](RecordBuilder& builder) { builder.Message(message); }, source);
@@ -231,108 +202,6 @@ namespace NGIN::Log
         NGIN_FORCEINLINE void Fatal(Fn&& fn, const std::source_location source = std::source_location::current()) noexcept
         {
             Log<LogLevel::Fatal>(std::forward<Fn>(fn), source);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Tracef(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Trace>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Tracefv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Trace>(source, fmt, args);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Debugf(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Debug>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Debugfv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Debug>(source, fmt, args);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Infof(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Info>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Infofv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Info>(source, fmt, args);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Warnf(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Warn>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Warnfv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Warn>(source, fmt, args);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Errorf(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Error>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Errorfv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Error>(source, fmt, args);
-        }
-
-        template<class... Args>
-        NGIN_FORCEINLINE void Fatalf(
-            const std::source_location source,
-            std::format_string<Args...> fmt,
-            Args&&... args) noexcept
-        {
-            Logf<LogLevel::Fatal>(source, fmt, std::forward<Args>(args)...);
-        }
-
-        NGIN_FORCEINLINE void Fatalfv(
-            const std::source_location source,
-            const std::string_view fmt,
-            const std::format_args args) noexcept
-        {
-            Logfv<LogLevel::Fatal>(source, fmt, args);
         }
 
     private:

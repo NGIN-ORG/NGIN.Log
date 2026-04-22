@@ -2,16 +2,16 @@
 
 NGIN.Log is a standalone C++23 logging library in the NGIN family.
 
-It is built around a bounded record builder, compile-time plus runtime filtering, structured attributes, formatter-driven output, and bounded async delivery. The library stays usable without macros, while optionally providing source-capturing macro helpers for formatted calls.
+It is built around a bounded record builder, compile-time plus runtime filtering, structured attributes, formatter-driven output, and bounded async delivery. `NGIN.Log` owns record capture and delivery; application code owns message-string construction.
 
 ## What It Provides
 
-- macro-free logger APIs with optional `NGIN/Log/Macros.hpp`
+- macro-free logger APIs
 - compile-time minimum log levels plus runtime per-logger filtering
-- direct message logging, builder-style logging, and formatted logging
+- direct message logging plus builder-style logging
 - richer attribute normalization including durations, error codes, enums, pointers, and owned strings
 - thread-local scoped logging context
-- formatter/transport split with text, JSON, and logfmt output
+- output formatter/transport split with text, JSON, and logfmt rendering
 - sync sinks (`ConsoleSink`, `FileSink`, `RotatingFileSink`)
 - async sink wrapping with bounded queues, overflow policies, and live stats
 - hierarchical logger registry rules for live runtime configuration
@@ -20,7 +20,8 @@ It is built around a bounded record builder, compile-time plus runtime filtering
 
 ```cpp
 #include <NGIN/Log/Log.hpp>
-#include <NGIN/Log/Macros.hpp>
+
+#include <format>
 
 int main()
 {
@@ -43,7 +44,12 @@ int main()
 
     auto scope = NGIN::Log::PushLogContext({{"request_id", "req-1"}});
     logger.Info("started");
-    NGIN_LOG_INFOF(logger, "value={} ok={}", 42, true);
+    logger.Info(std::format("value={} ok={}", 42, true));
+    logger.Debug([](NGIN::Log::RecordBuilder& rec) {
+        rec.Message(std::format("lazy-build value={}", 17));
+        rec.Attr("value", 17);
+        rec.Attr("ok", true);
+    });
     logger.Flush();
     (void)scope;
 }
@@ -53,7 +59,7 @@ int main()
 
 ### Builder API
 
-Best for hot paths and precise work control.
+Best for hot paths, structured records, and deferred work. The callback only runs after compile-time and runtime filtering pass.
 
 ```cpp
 logger.Debug([&](NGIN::Log::RecordBuilder& rec) {
@@ -65,19 +71,21 @@ logger.Debug([&](NGIN::Log::RecordBuilder& rec) {
 
 ### Direct Message API
 
-Best for the common simple case.
+Best for the common simple case when message text is already available.
 
 ```cpp
 logger.Warn("slow request");
 ```
 
-### Format API
+### Message Construction
 
-Best when convenience matters more than avoiding every formatting cost.
+Message formatting is application-owned. Build text with `std::format`, `fmt::format`, or any other formatter before calling the direct-message API, or defer that work inside the builder callback.
 
 ```cpp
-logger.Infof(std::source_location::current(), "value={} ok={}", value, ok);
+logger.Info(std::format("value={} ok={}", value, ok));
 ```
+
+Prefer structured attributes over embedding operational fields into the message when those values matter for filtering or ingestion.
 
 ## Build Targets
 
