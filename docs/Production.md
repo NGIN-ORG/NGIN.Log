@@ -61,6 +61,21 @@ Choose `LogFmtRecordFormatter` when:
 - you want text output with more structure than plain human-readable logs
 - the downstream system already expects logfmt
 
+## Telemetry Hints
+
+Per-record attributes may now carry advisory `LogAttributeKind` hints:
+
+- `Default`
+- `Tag`
+- `Context`
+- `Extra`
+
+Current behavior:
+
+- built-in formatters ignore these hints
+- future custom sinks may use them for backend-specific mapping
+- scoped context still merges into the record as `Default` attributes in this pass
+
 ## Async Overflow Policies
 
 `AsyncSink` supports multiple overflow behaviors. Treat this as an operational policy choice, not a cosmetic option.

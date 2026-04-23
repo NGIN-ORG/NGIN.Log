@@ -45,13 +45,19 @@ namespace NGIN::Log
 
         void Attr(const std::string_view key, const AttributeValue& value) noexcept
         {
-            AppendAttribute(key, CopyAttributeValue(value));
+            AppendAttribute(key, CopyAttributeValue(value), LogAttributeKind::Default);
         }
 
         template<class TValue>
         void Attr(const std::string_view key, TValue&& value) noexcept
         {
-            AppendAttribute(key, NormalizeValue(std::forward<TValue>(value)));
+            Attr(key, std::forward<TValue>(value), LogAttributeKind::Default);
+        }
+
+        template<class TValue>
+        void Attr(const std::string_view key, TValue&& value, const LogAttributeKind kind) noexcept
+        {
+            AppendAttribute(key, NormalizeValue(std::forward<TValue>(value)), kind);
         }
 
         [[nodiscard]] auto GetMessage() const noexcept -> std::string_view
@@ -216,7 +222,7 @@ namespace NGIN::Log
             }
         }
 
-        void AppendAttribute(const std::string_view key, const AttributeValue& value) noexcept
+        void AppendAttribute(const std::string_view key, const AttributeValue& value, const LogAttributeKind kind) noexcept
         {
             if (m_attributeCount >= Config::MaxAttributes)
             {
@@ -226,6 +232,7 @@ namespace NGIN::Log
 
             m_attributes[m_attributeCount].key = CopyText(key);
             m_attributes[m_attributeCount].value = value;
+            m_attributes[m_attributeCount].kind = kind;
             ++m_attributeCount;
         }
 

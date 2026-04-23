@@ -336,7 +336,7 @@ namespace NGIN::Log
                 {
                     if (mergedAttributes[i].key == attribute.key)
                     {
-                        mergedAttributes[i].value = attribute.value;
+                        mergedAttributes[i] = attribute;
                         return;
                     }
                 }
@@ -355,6 +355,7 @@ namespace NGIN::Log
                 appendOrReplace(LogAttribute {
                     .key = CopyContextText(contextAttribute.key, contextTextStorage, contextTextUsed, truncatedBytes),
                     .value = CopyContextValue(contextAttribute.value, contextTextStorage, contextTextUsed, truncatedBytes),
+                    .kind = LogAttributeKind::Default,
                 });
             }
 

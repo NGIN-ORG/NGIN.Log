@@ -132,6 +132,17 @@ logger.Info(std::format("value={} ok={}", value, ok));
 
 Prefer structured attributes over embedding operational fields into the message when those values matter for filtering or ingestion.
 
+## Telemetry Note
+
+`NGIN.Log` now preserves advisory attribute intent through `LogAttributeKind`.
+
+- `Default` keeps current behavior
+- `Tag`, `Context`, and `Extra` are sink hints only
+- built-in text, JSON, and logfmt formatters ignore these hints
+- scoped context still enters the merged record as unclassified `Default` attributes in this implementation
+
+This keeps telemetry mapping as sink policy rather than core logger policy.
+
 ## Start Here
 
 If you are new to the library, use this path:

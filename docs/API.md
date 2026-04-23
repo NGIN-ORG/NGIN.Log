@@ -33,6 +33,15 @@ Attribute values on the transport path remain:
 - `bool`
 - `std::string_view`
 
+Attribute intent hints:
+- `enum class LogAttributeKind : NGIN::UInt8`
+- values: `Default`, `Tag`, `Context`, `Extra`
+
+`LogAttribute` fields:
+- `key`
+- `value`
+- `kind`
+
 `LogRecordView` fields:
 - `timestampEpochNanoseconds`
 - `level`
@@ -49,6 +58,7 @@ Attribute values on the transport path remain:
 Stack-only bounded builder:
 - `Message(std::string_view)`
 - `Attr(std::string_view key, TValue&& value)`
+- `Attr(std::string_view key, TValue&& value, LogAttributeKind kind)`
 
 Normalized attribute inputs now include:
 - signed and unsigned integrals
@@ -65,6 +75,11 @@ Bounded behavior:
 - attributes capped by `Config::MaxAttributes`
 - attribute string text pooled in bounded inline storage
 
+Attribute-kind behavior:
+- `Attr(key, value)` defaults to `LogAttributeKind::Default`
+- explicit kinds are advisory sink hints only
+- built-in formatters ignore `kind` in this implementation
+
 ## Scoped Context
 
 - `using ContextValue = std::variant<...>`
@@ -77,6 +92,10 @@ Context is thread-local. Merge order is:
 3. per-record attributes
 
 Later duplicate keys win.
+
+Current classification rule:
+- scoped context contributes merged attributes with `LogAttributeKind::Default`
+- a later per-record attribute replaces both the previous value and previous kind
 
 ## Formatter API
 

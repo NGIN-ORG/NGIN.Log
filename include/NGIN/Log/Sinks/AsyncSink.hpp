@@ -230,6 +230,7 @@ namespace NGIN::Log
                 const auto& inAttr = record.attributes[i];
                 auto&       outAttr = out.attributes[i];
                 outAttr.key.Assign(inAttr.key, out.truncatedBytes);
+                outAttr.kind = inAttr.kind;
 
                 std::visit(
                     [&](const auto& value) {
@@ -526,6 +527,7 @@ namespace NGIN::Log
             {
                 attrs[i].key = owned.attributes[i].key.View();
                 attrs[i].value = ToViewValue(owned.attributes[i].value);
+                attrs[i].kind = owned.attributes[i].kind;
             }
 
             const LogRecordView record {

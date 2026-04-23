@@ -69,8 +69,9 @@ namespace
 
     struct CapturedAttribute
     {
-        std::string   key {};
-        CapturedValue value {};
+        std::string                 key {};
+        CapturedValue               value {};
+        NGIN::Log::LogAttributeKind kind {NGIN::Log::LogAttributeKind::Default};
     };
 
     struct CaptureState
@@ -129,6 +130,7 @@ namespace
                 m_state->lastAttributes.push_back(CapturedAttribute {
                     .key = std::string(attribute.key),
                     .value = CopyAttributeValue(attribute.value),
+                    .kind = attribute.kind,
                 });
             }
             m_state->lastTruncatedAttributeCount = record.truncatedAttributeCount;
@@ -370,6 +372,31 @@ TEST_CASE("RecordBuilder supports richer attribute normalization", "[log][builde
     REQUIRE(std::get<std::string>(FindCapturedAttribute(state, "text")->value) == "owned");
 }
 
+TEST_CASE("RecordBuilder attribute kinds default and explicit hints propagate", "[log][builder][kind]")
+{
+    using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
+
+    CaptureState        state {};
+    LoggerType::SinkSet sinks {};
+    sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
+
+    LoggerType logger("AttrKinds", NGIN::Log::LogLevel::Trace, std::move(sinks));
+
+    logger.Info([](NGIN::Log::RecordBuilder& rec) {
+        rec.Message("kinds");
+        rec.Attr("defaulted", 1);
+        rec.Attr("tagged", "yes", NGIN::Log::LogAttributeKind::Tag);
+        rec.Attr("contextual", "ctx", NGIN::Log::LogAttributeKind::Context);
+        rec.Attr("extra", true, NGIN::Log::LogAttributeKind::Extra);
+    });
+
+    std::lock_guard lock(state.mutex);
+    REQUIRE(FindCapturedAttribute(state, "defaulted")->kind == NGIN::Log::LogAttributeKind::Default);
+    REQUIRE(FindCapturedAttribute(state, "tagged")->kind == NGIN::Log::LogAttributeKind::Tag);
+    REQUIRE(FindCapturedAttribute(state, "contextual")->kind == NGIN::Log::LogAttributeKind::Context);
+    REQUIRE(FindCapturedAttribute(state, "extra")->kind == NGIN::Log::LogAttributeKind::Extra);
+}
+
 TEST_CASE("Scoped context merges outer inner and record attributes with later values winning", "[log][context]")
 {
     using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
@@ -402,6 +429,56 @@ TEST_CASE("Scoped context merges outer inner and record attributes with later va
     REQUIRE(std::get<NGIN::Int64>(FindCapturedAttribute(state, "status")->value) == 200);
     (void)outer;
     (void)inner;
+}
+
+TEST_CASE("Merged attributes preserve per-record kind precedence over context", "[log][context][kind]")
+{
+    using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
+
+    CaptureState        state {};
+    LoggerType::SinkSet sinks {};
+    sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
+
+    LoggerType logger("ContextKinds", NGIN::Log::LogLevel::Trace, std::move(sinks));
+
+    auto scope = NGIN::Log::PushLogContext({
+        {"subsystem", "context"},
+        {"request_id", "req-42"},
+    });
+
+    logger.Info([](NGIN::Log::RecordBuilder& rec) {
+        rec.Message("ctx-kind");
+        rec.Attr("subsystem", "streaming", NGIN::Log::LogAttributeKind::Tag);
+        rec.Attr("request_id", "record", NGIN::Log::LogAttributeKind::Extra);
+    });
+
+    std::lock_guard lock(state.mutex);
+    REQUIRE(std::get<std::string>(FindCapturedAttribute(state, "subsystem")->value) == "streaming");
+    REQUIRE(FindCapturedAttribute(state, "subsystem")->kind == NGIN::Log::LogAttributeKind::Tag);
+    REQUIRE(std::get<std::string>(FindCapturedAttribute(state, "request_id")->value) == "record");
+    REQUIRE(FindCapturedAttribute(state, "request_id")->kind == NGIN::Log::LogAttributeKind::Extra);
+    (void)scope;
+}
+
+TEST_CASE("Duplicate per-record attributes preserve later kind and value", "[log][builder][kind]")
+{
+    using LoggerType = NGIN::Log::Logger<NGIN::Log::LogLevel::Trace>;
+
+    CaptureState        state {};
+    LoggerType::SinkSet sinks {};
+    sinks.push_back(NGIN::Log::MakeSink<CaptureSink>(&state));
+
+    LoggerType logger("DuplicateKinds", NGIN::Log::LogLevel::Trace, std::move(sinks));
+
+    logger.Info([](NGIN::Log::RecordBuilder& rec) {
+        rec.Message("dup");
+        rec.Attr("phase", "start", NGIN::Log::LogAttributeKind::Tag);
+        rec.Attr("phase", "final", NGIN::Log::LogAttributeKind::Extra);
+    });
+
+    std::lock_guard lock(state.mutex);
+    REQUIRE(std::get<std::string>(FindCapturedAttribute(state, "phase")->value) == "final");
+    REQUIRE(FindCapturedAttribute(state, "phase")->kind == NGIN::Log::LogAttributeKind::Extra);
 }
 
 TEST_CASE("Context truncation is counted when merged attributes exceed bounds", "[log][context][truncate]")
@@ -484,6 +561,42 @@ TEST_CASE("Logfmt formatter stays single line and escapes strings", "[log][forma
     REQUIRE(output.find("msg=\"hello\\nworld\"") != std::string::npos);
     REQUIRE(output.find("tag=\"quoted \\\"value\\\"\"") != std::string::npos);
     REQUIRE(output.find('\n') == output.size() - 1);
+}
+
+TEST_CASE("Built-in formatters ignore attribute kind hints", "[log][formatter][kind]")
+{
+    auto recordDefault = MakeRecord("Kinds", "msg");
+    auto recordTagged = MakeRecord("Kinds", "msg");
+    NGIN::Log::LogAttribute defaultAttrs[] {
+        {.key = "code", .value = static_cast<NGIN::Int64>(42)},
+    };
+    NGIN::Log::LogAttribute taggedAttrs[] {
+        {.key = "code", .value = static_cast<NGIN::Int64>(42), .kind = NGIN::Log::LogAttributeKind::Tag},
+    };
+    recordDefault.attributes = defaultAttrs;
+    recordTagged.attributes = taggedAttrs;
+
+    NGIN::Log::TextRecordFormatter textFormatter;
+    NGIN::Log::JsonRecordFormatter jsonFormatter;
+    NGIN::Log::LogFmtRecordFormatter logFmtFormatter;
+
+    std::string textDefault;
+    std::string textTagged;
+    std::string jsonDefault;
+    std::string jsonTagged;
+    std::string logFmtDefault;
+    std::string logFmtTagged;
+
+    textFormatter.Format(recordDefault, textDefault);
+    textFormatter.Format(recordTagged, textTagged);
+    jsonFormatter.Format(recordDefault, jsonDefault);
+    jsonFormatter.Format(recordTagged, jsonTagged);
+    logFmtFormatter.Format(recordDefault, logFmtDefault);
+    logFmtFormatter.Format(recordTagged, logFmtTagged);
+
+    REQUIRE(textDefault == textTagged);
+    REQUIRE(jsonDefault == jsonTagged);
+    REQUIRE(logFmtDefault == logFmtTagged);
 }
 
 TEST_CASE("Text formatter caches and avoids steady-state allocations after warmup", "[log][formatter][alloc]")
@@ -683,6 +796,28 @@ TEST_CASE("Async sink producer path is allocation-free after warmup", "[log][asy
     const auto after = g_allocationCount.load(std::memory_order_relaxed);
 
     REQUIRE(after == before);
+}
+
+TEST_CASE("Async sink preserves attribute kind hints", "[log][async][kind]")
+{
+    CaptureState state {};
+
+    auto captureSink = NGIN::Memory::MakeScoped<CaptureSink>(&state);
+    NGIN::Log::AsyncSink<CaptureSink, 8, 1> asyncSink(std::move(captureSink));
+
+    auto record = MakeRecord("AsyncKind", "msg");
+    NGIN::Log::LogAttribute attrs[2] {
+        {.key = "tag", .value = std::string_view("alpha"), .kind = NGIN::Log::LogAttributeKind::Tag},
+        {.key = "payload", .value = static_cast<NGIN::Int64>(7), .kind = NGIN::Log::LogAttributeKind::Extra},
+    };
+    record.attributes = attrs;
+
+    asyncSink.Write(record);
+    asyncSink.Flush();
+
+    std::lock_guard lock(state.mutex);
+    REQUIRE(FindCapturedAttribute(state, "tag")->kind == NGIN::Log::LogAttributeKind::Tag);
+    REQUIRE(FindCapturedAttribute(state, "payload")->kind == NGIN::Log::LogAttributeKind::Extra);
 }
 
 TEST_CASE("Async sink withstands repeated producer flush stress", "[log][async][stress]")

@@ -14,12 +14,21 @@
 
 namespace NGIN::Log
 {
+    enum class LogAttributeKind : NGIN::UInt8
+    {
+        Default = 0,
+        Tag,
+        Context,
+        Extra,
+    };
+
     using AttributeValue = std::variant<NGIN::Int64, NGIN::UInt64, double, bool, std::string_view>;
 
     struct LogAttribute
     {
-        std::string_view key {};
-        AttributeValue   value {};
+        std::string_view  key {};
+        AttributeValue    value {};
+        LogAttributeKind  kind {LogAttributeKind::Default};
     };
 
     struct LogRecordView
@@ -71,6 +80,7 @@ namespace NGIN::Log
     {
         InlineText<Config::MaxAttrTextBytes> key {};
         OwnedAttributeValue                  value {};
+        LogAttributeKind                    kind {LogAttributeKind::Default};
     };
 
     struct OwnedLogRecord
